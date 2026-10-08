@@ -714,6 +714,13 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 	set_property( AMF_VIDEO_ENCODER_FILLER_DATA_ENABLE, false, "FillerDataEnable", false );
 	set_property( AMF_VIDEO_ENCODER_RATE_CONTROL_SKIP_FRAME_ENABLE, false, "RateControlSkipFrameEnable", false );
 	set_property( AMF_VIDEO_ENCODER_ADAPTIVE_MINIGOP, false, "AdaptiveMiniGOP", false );
+	// Tell the encoder what memory its input surfaces live in. The default is AMF_MEMORY_UNKNOWN,
+	// i.e. let the runtime work it out - and on the tested hardware that detection does not see a
+	// wrapped DX11 texture: the encoder reads it as empty (black stream, valid parameter sets) while
+	// the same pipeline with AMF's own host-memory surfaces, which is what FFmpeg uses, works.
+	// Optional, so a runtime that does not know the property still initialises.
+	set_property( AMF_VIDEO_ENCODER_MEMORY_TYPE, static_cast< amf_int64 >( AMF_MEMORY_DX11 ), "EncoderMemoryType", false );
+
 	// Repeat SPS/PPS so every IDR carries the headers FLOWH264 needs after a keyframe request.
 	set_property( AMF_VIDEO_ENCODER_HEADER_INSERTION_SPACING, static_cast< amf_int64 >( 1 ), "HeaderInsertionSpacing", false );
 
@@ -743,6 +750,15 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 			buffer->Release();
 		}
 		variant.pInterface->Release();
+	}
+
+	// Read the memory type back: if the runtime treats EncoderMemoryType as a capability rather than
+	// an input property, this is what it says it accepts (3 is AMF_MEMORY_DX11).
+	AMFVariantStruct memory_type_variant = {};
+	if ( impl.encoder->GetProperty( AMF_VIDEO_ENCODER_MEMORY_TYPE, &memory_type_variant ) == AMF_OK )
+	{
+		DriverLog( "Flow AMF: EncoderMemoryType reports %lld (asked for %d = AMF_MEMORY_DX11)",
+		           static_cast< long long >( memory_type_variant.int64Value ), static_cast< int >( AMF_MEMORY_DX11 ) );
 	}
 
 	// Dynamic property: let QueryOutput wait for the bitstream instead of spinning.

@@ -405,7 +405,12 @@ bool FlowVirtualDisplayDevice::InitializeD3DResources()
 	}
 
 	D3D_FEATURE_LEVEL feature_level{};
-	const HRESULT hr = D3D11CreateDevice( adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
+	// D3D11_CREATE_DEVICE_VIDEO_SUPPORT matches how FFmpeg creates the device it feeds to AMF
+	// (hwcontext_d3d11va.c: creationFlags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT). Without it the AMF
+	// encoder accepts DX11 surfaces from this device but reads them as empty on the tested hardware -
+	// a fully valid, all-black H.264 stream with no error anywhere - while the same pipeline on a
+	// video-capable device (what ffmpeg proved works on the same machine) encodes correctly.
+	const HRESULT hr = D3D11CreateDevice( adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0,
 	                                      D3D11_SDK_VERSION, &d3d_device_, &feature_level, &d3d_context_ );
 	adapter->Release();
 

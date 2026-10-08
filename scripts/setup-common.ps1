@@ -165,6 +165,12 @@ function Get-VisualStudioInstance {
     return @{ Path = "$path".Trim(); Version = "$version".Trim(); DisplayName = "$name".Trim() }
 }
 
+# Major version of a version string such as "18.10.12224.181".
+function Get-MajorVersion([string]$version) {
+    if ($version -match '^\s*(\d+)\.') { return [int]$Matches[1] }
+    return 0
+}
+
 function Get-VisualStudioPath {
     $instance = Get-VisualStudioInstance
     if ($instance) { return $instance.Path }
@@ -175,17 +181,54 @@ function Test-VisualStudio {
     return [bool](Get-VisualStudioPath)
 }
 
-# cmake from PATH, or the copy that ships with Visual Studio / Build Tools (the "C++ CMake tools
-# for Windows" component). Installing Build Tools without a separate CMake is common, and the
-# build needs cmake on PATH.
-function Find-Cmake {
-    $inPath = Find-InPath @("cmake", "cmake.exe")
-    if ($inPath) { return @{ Path = $inPath; Source = "PATH" } }
+# CMake names its Visual Studio generators after the product year and only accepts an instance of
+# that version, so VS 2026 (v18) needs the "Visual Studio 18 2026" generator: with "Visual Studio
+# 17 2022" it refuses the instance ("the version field is not 4 integer components starting in
+# 17") or reports no instance at all. "Visual Studio 18 2026" needs CMake 4.2 or newer.
+function Get-VisualStudioGenerator([int]$major) {
+    switch ($major) {
+        16 { return "Visual Studio 16 2019" }
+        17 { return "Visual Studio 17 2022" }
+        18 { return "Visual Studio 18 2026" }
+        default { return $null }
+    }
+}
+
+# The Visual Studio version encoded in a generator name such as "Visual Studio 18 2026".
+function Get-GeneratorMajorVersion([string]$generator) {
+    if ($generator -match 'Visual Studio\s+(\d+)') { return [int]$Matches[1] }
+    return 0
+}
+
+# The CMake that Visual Studio / Build Tools bundles (the "C++ CMake tools for Windows"
+# component), whether or not cmake is also on PATH.
+function Find-BundledCmake {
     $vs = Get-VisualStudioPath
     if ($vs) {
         $bundled = Join-SafePath $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-        if (Test-SafePath $bundled) { return @{ Path = $bundled; Source = "Visual Studio" } }
+        if (Test-SafePath $bundled) { return $bundled }
     }
+    return $null
+}
+
+# "4.2" out of "cmake version 4.2.3", or $null when it cannot be read.
+function Get-CMakeVersion([string]$exe) {
+    if (-not $exe) { return $null }
+    try {
+        $first = (& $exe --version 2>$null | Select-Object -First 1)
+        if ("$first" -match 'cmake version (\d+)\.(\d+)') { return [version]"$($Matches[1]).$($Matches[2])" }
+    } catch {
+    }
+    return $null
+}
+
+# cmake from PATH, or the copy that ships with Visual Studio / Build Tools. Installing Build Tools
+# without a separate CMake is common, and the build needs cmake on PATH.
+function Find-Cmake {
+    $inPath = Find-InPath @("cmake", "cmake.exe")
+    if ($inPath) { return @{ Path = $inPath; Source = "PATH" } }
+    $bundled = Find-BundledCmake
+    if ($bundled) { return @{ Path = $bundled; Source = "Visual Studio" } }
     return $null
 }
 

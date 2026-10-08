@@ -45,10 +45,13 @@ foreach ($file in $files) {
         continue
     }
 
-    # Parameters of the script itself.
-    $parameters = @()
+    # Parameters of the script itself, with their type constraints.
+    $parameters = @{}
     foreach ($parameter in $ast.ParamBlock.Parameters) {
-        $parameters += $parameter.Name.VariablePath.UserPath
+        $name = $parameter.Name.VariablePath.UserPath
+        $type = ""
+        if ($parameter.StaticType) { $type = $parameter.StaticType.Name }
+        $parameters[$name] = $type
     }
 
     # Everything after the param block, ignoring function bodies (they get their own scope).
@@ -62,20 +65,34 @@ foreach ($file in $files) {
         return $false
     }
 
-    $collisions = @()
+    # Two things go wrong here. A [switch]/[bool] parameter only accepts booleans, so assigning
+    # anything else to it fails at run time - that is the setup-pc.ps1 -Check / $check bug. A
+    # foreach variable receives whatever the collection holds, so it can break a parameter of any
+    # type the same way. A plain assignment to an untyped or string parameter is the normal
+    # "override the default" pattern and is only worth a note.
     $assigned = @()
     foreach ($node in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
         if ($node.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
-            $assigned += @{ Name = $node.Left.VariablePath.UserPath; Offset = $node.Extent.StartOffset; Line = $node.Extent.StartLineNumber }
+            $assigned += @{ Name = $node.Left.VariablePath.UserPath; Kind = "assignment"; Offset = $node.Extent.StartOffset; Line = $node.Extent.StartLineNumber }
         }
     }
     foreach ($node in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForEachStatementAst] }, $true)) {
-        $assigned += @{ Name = $node.Variable.VariablePath.UserPath; Offset = $node.Extent.StartOffset; Line = $node.Extent.StartLineNumber }
+        $assigned += @{ Name = $node.Variable.VariablePath.UserPath; Kind = "foreach"; Offset = $node.Extent.StartOffset; Line = $node.Extent.StartLineNumber }
     }
+
+    $collisions = @()
+    $notes = @()
     foreach ($entry in $assigned) {
         if (& $isInFunction $entry.Offset) { continue }
-        if ($parameters -contains $entry.Name) {
-            $collisions += "line $($entry.Line): `$$($entry.Name) would overwrite the script parameter `$$($entry.Name) (use a different loop variable name)"
+        if (-not $parameters.ContainsKey($entry.Name)) { continue }
+        $type = $parameters[$entry.Name]
+        $booleanOnly = @("SwitchParameter", "Boolean", "Bool", "switch", "bool") -contains $type
+        if ($booleanOnly) {
+            $collisions += "line $($entry.Line): `$$($entry.Name) is the script parameter [$type] $($entry.Name), which only accepts a boolean"
+        } elseif ($entry.Kind -eq "foreach") {
+            $collisions += "line $($entry.Line): a foreach variable named `$$($entry.Name) would overwrite the script parameter [$type] $($entry.Name)"
+        } else {
+            $notes += "line $($entry.Line): `$$($entry.Name) overwrites the script parameter $($entry.Name) (fine if that is meant as a default)"
         }
     }
 
@@ -85,6 +102,9 @@ foreach ($file in $files) {
         $collisions | Select-Object -Unique | ForEach-Object { Write-Host "     $_" -ForegroundColor Red }
     } elseif (-not $Quiet) {
         Write-Host "ok   $($file.Name)" -ForegroundColor Green
+    }
+    if (-not $Quiet) {
+        foreach ($note in ($notes | Select-Object -Unique)) { Write-Host "     note: $note" -ForegroundColor DarkGray }
     }
 }
 

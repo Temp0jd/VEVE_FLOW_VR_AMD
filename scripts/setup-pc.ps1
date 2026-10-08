@@ -107,11 +107,38 @@ $visualStudio = Get-VisualStudioInstance
 if ($visualStudio) {
     $name = $visualStudio.DisplayName
     if (-not $name) { $name = "Visual Studio / Build Tools" }
-    $checks += @{ Name = "VS 2022 / Build Tools"; Ok = $true; Fix = ""; Blocking = $needsBuild
+    $checks += @{ Name = "Visual Studio"; Ok = $true; Fix = ""; Blocking = $needsBuild
         Detail = "$($visualStudio.Path) - $name $($visualStudio.Version)" }
 } else {
-    $checks += @{ Name = "VS 2022 / Build Tools"; Ok = $false; Detail = "C++ toolchain not found"; Blocking = $needsBuild
-        Fix = "Install Visual Studio 2022 with the 'Desktop development with C++' workload (Community edition is free), or the Build Tools for Visual Studio 2022 with the same workload." }
+    $checks += @{ Name = "Visual Studio"; Ok = $false; Detail = "C++ toolchain not found"; Blocking = $needsBuild
+        Fix = "Install Visual Studio 2022 or newer (2026 works too) with the 'Desktop development with C++' workload - Community edition is free - or the matching Build Tools." }
+}
+
+# CMake's Visual Studio generators are version specific (VS 2026 / v18 needs "Visual Studio 18
+# 2026" and CMake 4.2+), so surface that here instead of letting the build fail on it.
+if ($visualStudio) {
+    $generator = Get-VisualStudioGenerator (Get-MajorVersion $visualStudio.Version)
+    if ($generator) {
+        $generatorMajor = Get-GeneratorMajorVersion $generator
+        $cmakeVersion = $null
+        if ($cmake) { $cmakeVersion = Get-CMakeVersion $cmake.Path }
+        $hasVersion = [bool]$cmakeVersion
+        if ($generatorMajor -ge 18 -and (-not $hasVersion -or $cmakeVersion -lt [version]"4.2")) {
+            $bundledCmake = Find-BundledCmake
+            if ($bundledCmake) {
+                $checks += @{ Name = "CMake generator"; Ok = $true; Fix = ""; Blocking = $needsBuild
+                    Detail = "$generator (this CMake cannot create it; the one bundled with Visual Studio will be used)" }
+            } else {
+                $checks += @{ Name = "CMake generator"; Ok = $false; Blocking = $needsBuild
+                    Fix = "Upgrade CMake (winget upgrade Kitware.CMake), or add the 'C++ CMake tools for Windows' component to Visual Studio."
+                    Detail = "$generator needs CMake 4.2+$(if ($hasVersion) { ", this one is $cmakeVersion" })" }
+            }
+        } else {
+            $detail = $generator
+            if ($hasVersion) { $detail = "$generator (CMake $cmakeVersion)" }
+            $checks += @{ Name = "CMake generator"; Ok = $true; Detail = $detail; Fix = ""; Blocking = $needsBuild }
+        }
+    }
 }
 
 # SteamVR: the driver is registered with it and it owns the stream sockets.

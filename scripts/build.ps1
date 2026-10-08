@@ -39,39 +39,70 @@ function Invoke-Checked([string]$exe, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { Fail "$exe $($arguments -join ' ') failed (exit $LASTEXITCODE)" }
 }
 
-# The Visual Studio instance to build with, resolved once by vswhere.
+# ---- CMake and the Visual Studio toolchain ----------------------------------------------------
+
+# cmake: from PATH, or the copy bundled with Visual Studio / Build Tools ("C++ CMake tools for
+# Windows"). Installing only the Build Tools without a separate CMake is common.
+$cmakeExe = "cmake"
+$cmakeOnPath = Get-Command cmake -ErrorAction SilentlyContinue
+$cmakeVersion = $null
+if ($cmakeOnPath) {
+    $cmakeVersion = Get-CMakeVersion $cmakeOnPath.Source
+} else {
+    $bundled = Find-BundledCmake
+    if ($bundled) {
+        $cmakeExe = $bundled
+        $cmakeVersion = Get-CMakeVersion $bundled
+        Write-Host "Using the CMake that ships with Visual Studio: $bundled"
+    } else {
+        Fail "cmake not found. Install CMake (winget install Kitware.CMake) or add the 'C++ CMake tools for Windows' component to Visual Studio / Build Tools."
+    }
+}
+
+# The Visual Studio instance to build with, resolved once by vswhere, and the CMake generator that
+# matches it. The generators are version specific: CMake's "Visual Studio 17 2022" refuses a VS
+# 2026 (v18) instance outright ("the version field is not 4 integer components starting in 17"),
+# so the generator has to follow the installed product.
 $vsInstance = Get-VisualStudioInstance
+$vsMajor = 0
+if ($vsInstance) { $vsMajor = Get-MajorVersion $vsInstance.Version }
+if (-not $PSBoundParameters.ContainsKey("Generator")) {
+    $matching = Get-VisualStudioGenerator $vsMajor
+    if ($matching) { $Generator = $matching }
+}
+$generatorMajor = Get-GeneratorMajorVersion $Generator
+
+# "Visual Studio 18 2026" (VS 2026 / v18) needs CMake 4.2, but the CMake that Visual Studio 2026
+# bundles supports it, so use that one rather than failing.
+if ($generatorMajor -ge 18 -and ($cmakeVersion -eq $null -or $cmakeVersion -lt [version]"4.2")) {
+    $bundled = Find-BundledCmake
+    if ($bundled) {
+        $bundledVersion = Get-CMakeVersion $bundled
+        Write-Host "Using the CMake bundled with Visual Studio ($bundledVersion): $cmakeVersion cannot create the $Generator generator"
+        $cmakeExe = $bundled
+        $cmakeVersion = $bundledVersion
+    } elseif ($cmakeVersion) {
+        Fail "CMake $cmakeVersion cannot create the '$Generator' generator (needs 4.2 or newer). Upgrade CMake (winget upgrade Kitware.CMake), or add the 'C++ CMake tools for Windows' component to Visual Studio."
+    }
+}
 
 function Build-CMakeProject([string]$sourceDir) {
     $buildDir = Join-Path $sourceDir "build"
     if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
         $configure = @("-S", $sourceDir, "-B", $buildDir, "-G", $Generator, "-A", "x64")
-        if ($vsInstance -and $Generator -like "Visual Studio*") {
-            # Pin the instance we found with vswhere. CMake's own discovery reports "could not find
+        if ($vsInstance -and $Generator -like "Visual Studio*" -and $generatorMajor -eq $vsMajor) {
+            # Pin the instance we found with vswhere: CMake's own discovery reports "could not find
             # any instance of Visual Studio" when Visual Studio is installed outside its default
-            # folder, or when only the Build Tools are installed, even though the toolchain is
-            # there. A location plus the build number is the documented way to name an instance.
+            # folder. The version field must belong to the generator's version, so it is only added
+            # when the installed product matches the generator.
             $instance = $vsInstance.Path
             if ($vsInstance.Version) { $instance = "$instance,version=$($vsInstance.Version)" }
             $configure += @("-DCMAKE_GENERATOR_INSTANCE=$instance")
-            Write-Host "Using Visual Studio at $($vsInstance.Path) ($($vsInstance.DisplayName))"
+            Write-Host "Using $Generator with $($vsInstance.DisplayName) at $($vsInstance.Path)"
         }
-        Invoke-Checked "cmake" $configure
+        Invoke-Checked $cmakeExe $configure
     }
-    Invoke-Checked "cmake" @("--build", $buildDir, "--config", "Release")
-}
-
-# cmake: from PATH, or the copy bundled with Visual Studio / Build Tools ("C++ CMake tools for
-# Windows"). Installing only the Build Tools without a separate CMake is common.
-if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-    $cmake = Find-Cmake
-    if ($cmake) {
-        $env:PATH = (Split-Path $cmake.Path) + ";" + $env:PATH
-        Write-Host "Using the CMake that ships with Visual Studio: $($cmake.Path)"
-    }
-}
-if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-    Fail "cmake not found in PATH. Install CMake (winget install Kitware.CMake) or add the 'C++ CMake tools for Windows' component to Visual Studio / Build Tools."
+    Invoke-Checked $cmakeExe @("--build", $buildDir, "--config", "Release")
 }
 
 # The driver DLL and helper exe are locked while SteamVR runs.

@@ -98,8 +98,8 @@ Flow **不需要设置 PC 的 IP**：PC 在 UDP 8002 广播 `FLOWH264_PC 8001`�
 |---|---|
 | Steam + SteamVR | Steam |
 | Desktop+ | Steam 免费（app 1494460）。**只有“在头盔里看 PC 桌面”才需要**；只看视频可跳过 |
-| Visual Studio 2022 | 需勾“使用 C++ 的桌面开发”。CMake 要用它的编译器 |
-| CMake ≥ 3.15 | 可用 VS 内附的，或 `winget install Kitware.CMake` |
+| Visual Studio 2022 **或更新版本**（2026 也可） | 需勾“使用 C++ 的桌面开发”。CMake 要用它的编译器 |
+| CMake ≥ 3.15 | 可用 VS 内附的，或 `winget install Kitware.CMake`。**装了 VS 2026（v18）时建议 CMake 4.2+**（`Visual Studio 18 2026` 生成器需要）；CMake 太旧时脚本会自动改用 VS 内附的那份 |
 | Android Studio | 提供 Android SDK 与 platform-tools（adb） |
 | Android NDK **21.4.7075529** | 用 SDK Manager 装这个**特定版本** |
 | JDK **8** | 需完整 JDK（要有 `javac`，不是 JRE）。设 `JAVA_HOME`，或解压 Temurin JDK 8 到 `tools\jdk8\<文件夹>` |
@@ -411,6 +411,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 - **先跑 `setup-pc.ps1 -Check`**：它会告诉你到底缺哪个、缺在哪、怎么装（比逐项手动确认快）。
 - **`cmake not found`**：装 Build Tools 时 CMake 不会进 PATH。脚本会自动找到 VS/Build Tools 内附的那份；若真没有，`winget install Kitware.CMake` 或重跑安装器勾「对 C++ 的 CMake 工具」。
 - **`could not find any instance of Visual Studio`**：Visual Studio 装在**非默认目录**（例如 `D:\VS2022`）或只装了 **Build Tools** 时，CMake 自己的实例探测会失效，即使 vswhere 能找到。脚本会把找到的实例直接指给 CMake（`-DCMAKE_GENERATOR_INSTANCE=<路径>,version=<build号>`），不需要重装 VS。
+- **`the version field is not 4 integer components starting in 17`**：装了 **Visual Studio 2026（v18）**，但用了 `Visual Studio 17 2022` 生成器。CMake 的生成器与 VS 版本是绑定的（v18 要用 `Visual Studio 18 2026`，需要 CMake 4.2+）。脚本会**按 vswhere 报的版本自动选生成器**，并在 PATH 里的 CMake 太旧时改用 **VS 内附的那份 CMake**，所以两种 VS 都不用改设定。
 - **建置驱动失败（文件被锁定）**：先关闭 SteamVR（`setup-pc.ps1` 会自己检查并提示）。
 - **`JDK 8 not found`**：`JAVA_HOME` 指向 JRE 而不是 JDK（要 `bin\javac.exe`），或版本不是 1.8。
 - **`Wave SDK missing`**：`Wave_Native_SDK\repo\com\htc\vr\wvr_client` 不存在（见“Wave SDK”）。
@@ -598,7 +599,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Video
 
 | 东西 | 装哪 | 脚本怎么找 |
 |---|---|---|
-| Visual Studio 2022 / Build Tools + CMake | 安装时你选的盘 | `vswhere -requires …VC.Tools.x86.x64`；CMake 先看 PATH，再看 VS / Build Tools 内附的那份 |
+| Visual Studio 2022 / 2026 / Build Tools + CMake | 安装时你选的盘 | `vswhere -products * -requires …VC.Tools.x86.x64`；CMake 先看 PATH，再看 VS / Build Tools 内附的那份 |
 | Android SDK + platform-tools（adb） | 安装时你选的盘 | `ANDROID_SDK_ROOT` → `ANDROID_HOME` → `%LOCALAPPDATA%\Android\Sdk` |
 | Android NDK | 必须在 `<SDK>\ndk\21.4.7075529\` | 固定相对路径（`build.ps1` 会把它写进 `local.properties` 的 `ndk.dir`） |
 | SteamVR | Steam 的安装位置 | `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`（需启动过一次） |

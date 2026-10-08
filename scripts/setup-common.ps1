@@ -174,3 +174,40 @@ function Get-Subnet24([string]$ip) {
     if ($parts.Count -lt 3) { return $null }
     return ($parts[0..2] -join '.')
 }
+
+# Prints one line per prerequisite from the setup scripts' check lists. Items that do not stop the
+# build (Desktop+, the openvr submodule) are shown as "[ -- ]" instead of a red "[miss]".
+# Returns the number of blocking checks that failed.
+function Show-CheckList($items) {
+    $failed = 0
+    $width = 24
+    foreach ($item in $items) {
+        $mark = "[ -- ]"
+        $color = "Yellow"
+        if ($item.Ok) {
+            $mark = "[ ok ]"
+            $color = "Green"
+        } elseif ($item.Blocking) {
+            $mark = "[miss]"
+            $color = "Red"
+            $failed++
+        }
+        Write-Host ("  $mark " + $item.Name.PadRight($width) + " " + $item.Detail) -ForegroundColor $color
+        if ((-not $item.Ok) -and $item.Fix) {
+            Write-Host ("         -> " + $item.Fix) -ForegroundColor DarkGray
+        }
+    }
+    $total = $items.Count
+    $ok = ($items | Where-Object { $_.Ok }).Count
+    $optional = $total - $ok - $failed
+    Write-Host ""
+    if ($failed -eq 0) {
+        Write-Host "  $ok of $total checks passed; nothing blocking." -ForegroundColor Green
+    } else {
+        Write-Host "  $ok of $total checks passed; $failed blocking item(s) to fix." -ForegroundColor Yellow
+    }
+    if ($optional -gt 0) {
+        Write-Host "  ($optional optional item(s) marked [ -- ] do not stop the build)" -ForegroundColor DarkGray
+    }
+    return $failed
+}

@@ -38,12 +38,18 @@
     Do not touch Windows Firewall (see the README note about allowing vrserver on the private
     network instead).
 
+.PARAMETER Check
+    Only check that everything is installed and downloaded; build and register nothing. Prints
+    one line per prerequisite (what was found, and how to fix what is missing) and exits with
+    code 0 when ready to build, 1 otherwise.
+
 .PARAMETER WithDesktopStreamer
     Also build the optional Python/ffmpeg fallback streamer (needs the .NET SDK).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1
     powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Video
+    powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Check
     powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -SkipBuild
 #>
 param(
@@ -52,6 +58,7 @@ param(
     [switch]$SkipApk,
     [switch]$SkipInstall,
     [switch]$NoFirewall,
+    [switch]$Check,
     [switch]$WithDesktopStreamer
 )
 
@@ -64,50 +71,112 @@ $DriverDir = Join-Path $Root "pc\flow_steamvr_driver\build\dist\flowvr"
 $HelperDir = Join-Path $Root "pc\flow_dashboard_helper\build\dist"
 $Apk = Join-Path $Root "Wave_Native_SDK\samples\wvr_flow_probe\app\build\outputs\apk\bit64\debug\app-bit64-debug.apk"
 
-# ---- Preflight: collect everything that is missing, then report it all at once -----------------
+# ---- Preflight: check everything, then report it all at once -----------------------------------
 Step "Preflight (PC)"
 
-$needsApk = (-not $SkipBuild) -and (-not $SkipApk)
-$problems = @()
-$notes = @()
+# -Check means "am I ready to build?": always verify the toolchain, then exit with a plain list.
+$needsBuild = -not $SkipBuild
+if ($Check) {
+    $needsBuild = $true
+    $needsApk = $true
+} else {
+    $needsApk = (-not $SkipBuild) -and (-not $SkipApk)
+}
 
-if (-not $SkipBuild) {
-    $cmake = Find-Cmake
-    if (-not $cmake) {
-        $problems += "cmake not found. Install it (winget install Kitware.CMake), or add the 'C++ CMake tools for Windows' component when installing Visual Studio / Build Tools."
-    } elseif ($cmake.Source -eq "Visual Studio") {
+# One entry per prerequisite: Name, Ok, Detail (what was found), Fix, Blocking (does it stop the
+# build, or is it informational such as Desktop+ in -Video mode).
+$checks = @()
+
+# CMake: from PATH, or the copy bundled with Visual Studio / Build Tools.
+$cmake = Find-Cmake
+if ($cmake) {
+    $checks += @{ Name = "CMake"; Ok = $true; Detail = "$($cmake.Path) [$($cmake.Source)]"; Fix = ""; Blocking = $needsBuild }
+    if ($cmake.Source -eq "Visual Studio") {
         # build.ps1 runs as a child process and inherits this.
         $env:PATH = (Split-Path $cmake.Path) + ";" + $env:PATH
-        Note "using the CMake that ships with Visual Studio: $($cmake.Path)"
     }
-    if (-not (Test-VisualStudio)) {
-        $problems += "Visual Studio 2022 with the 'Desktop development with C++' workload not found (the Community edition is free). cmake needs its compiler."
-    }
+} else {
+    $checks += @{ Name = "CMake"; Ok = $false; Detail = "not found"; Blocking = $needsBuild
+        Fix = "Install it (winget install Kitware.CMake), or add the 'C++ CMake tools for Windows' component when installing Visual Studio / Build Tools." }
+}
+
+# Visual Studio 2022 (or the standalone Build Tools) with the C++ toolchain.
+$visualStudio = Get-VisualStudioPath
+if ($visualStudio) {
+    $checks += @{ Name = "VS 2022 / Build Tools"; Ok = $true; Detail = $visualStudio; Fix = ""; Blocking = $needsBuild }
+} else {
+    $checks += @{ Name = "VS 2022 / Build Tools"; Ok = $false; Detail = "C++ toolchain not found"; Blocking = $needsBuild
+        Fix = "Install Visual Studio 2022 with the 'Desktop development with C++' workload (Community edition is free), or the Build Tools for Visual Studio 2022 with the same workload." }
+}
+
+# SteamVR: the driver is registered with it and it owns the stream sockets.
+$steamVrPaths = Get-SteamVRPaths
+if ($steamVrPaths) {
+    $checks += @{ Name = "SteamVR"; Ok = $true; Detail = $steamVrPaths.Runtime; Fix = ""; Blocking = $true }
+} else {
+    $checks += @{ Name = "SteamVR"; Ok = $false; Detail = "%LOCALAPPDATA%\openvr\openvrpaths.vrpath not found"; Blocking = $true
+        Fix = "Install SteamVR from Steam and start it once." }
 }
 
 if ($needsApk) {
-    if (-not (Test-Path (Join-Path $Root "Wave_Native_SDK\repo\com\htc\vr\wvr_client"))) {
-        $problems += "Wave SDK missing. Download 'Wave Native SDK 4.5.0' from https://developer.vive.com (login required), then copy its 'repo' folder to Wave_Native_SDK\repo (see README 'Wave SDK')."
+    # Wave SDK (the local Maven package the Flow app builds against).
+    $waveRepo = Join-Path $Root "Wave_Native_SDK\repo\com\htc\vr\wvr_client"
+    $waveAar = Get-ChildItem -Path $waveRepo -Filter "wvr_client-*.aar" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($waveAar) {
+        $checks += @{ Name = "Wave SDK"; Ok = $true; Fix = ""; Blocking = $true
+            Detail = "$($waveAar.Name) ($([math]::Round($waveAar.Length / 1MB, 1)) MB)" }
+    } else {
+        $checks += @{ Name = "Wave SDK"; Ok = $false; Detail = "Wave_Native_SDK\repo\com\htc\vr\wvr_client is missing or empty"; Blocking = $true
+            Fix = "Download 'Wave Native SDK 4.5.0' from https://developer.vive.com (login required), then copy its 'repo' folder to Wave_Native_SDK\repo." }
     }
+
+    # Android SDK (platform-tools too, since the headset is driven over adb).
     $sdk = Find-AndroidSdk
-    if (-not $sdk) {
-        $problems += "Android SDK not found. Install Android Studio (or the command line tools) and set ANDROID_SDK_ROOT."
-    } elseif (-not (Find-AndroidNdk $sdk)) {
-        $problems += "Android NDK 21.4.7075529 not found under $sdk\ndk. Install exactly that version with the SDK Manager."
+    if ($sdk) {
+        $adb = Find-Adb
+        $detail = $sdk
+        if ($adb) { $detail = "$sdk (adb: $adb)" } else { $detail = "$sdk (platform-tools/adb missing)" }
+        $checks += @{ Name = "Android SDK"; Ok = [bool]$adb; Detail = $detail; Blocking = $true
+            Fix = "Install the platform-tools into the SDK (sdkmanager 'platform-tools') or add them to PATH." }
+    } else {
+        $checks += @{ Name = "Android SDK"; Ok = $false; Detail = "not found"; Blocking = $true
+            Fix = "Install Android Studio (or the command line tools) and set ANDROID_SDK_ROOT." }
     }
-    if (-not (Find-Jdk8 $Root)) {
-        $problems += "JDK 8 not found. Set JAVA_HOME to a JDK 8, or unpack Temurin JDK 8 into tools\jdk8\<jdk> (see README '建置環境')."
+
+    # Android NDK, exactly the version the Wave sample build files ask for.
+    if ($sdk) {
+        $ndk = Find-AndroidNdk $sdk
+        if ($ndk) {
+            $revision = ""
+            $properties = Join-Path $ndk "source.properties"
+            if (Test-Path $properties) {
+                $line = Select-String -Path $properties -Pattern "^Pkg\.Revision\s*=\s*(.+)$" | Select-Object -First 1
+                if ($line) { $revision = " (Pkg.Revision = $($line.Matches[0].Groups[1].Value.Trim()))" }
+            }
+            $checks += @{ Name = "Android NDK"; Ok = $true; Detail = "$ndk$revision"; Fix = ""; Blocking = $true }
+        } else {
+            $checks += @{ Name = "Android NDK"; Ok = $false; Detail = "21.4.7075529 not under $sdk\ndk"; Blocking = $true
+                Fix = "Install exactly that version with the SDK Manager: sdkmanager 'ndk;21.4.7075529'." }
+        }
+    } else {
+        $checks += @{ Name = "Android NDK"; Ok = $false; Detail = "unknown (no Android SDK)"; Blocking = $true
+            Fix = "Install the Android SDK first, then sdkmanager 'ndk;21.4.7075529'." }
+    }
+
+    # JDK 8 (the Wave sample uses Gradle 5.6.1 / AGP 3.5, which need a real JDK 8).
+    $jdk8 = Find-Jdk8 $Root
+    if ($jdk8) {
+        $checks += @{ Name = "JDK 8"; Ok = $true; Detail = $jdk8; Fix = ""; Blocking = $true }
+    } else {
+        $checks += @{ Name = "JDK 8"; Ok = $false; Detail = "not found"; Blocking = $true
+            Fix = "Set JAVA_HOME to a JDK 8, or unpack Temurin JDK 8 into tools\jdk8\<jdk> (see README.md, 'Build environment')." }
     }
 }
 
-if (-not (Get-SteamVRPaths)) {
-    $problems += "SteamVR is not installed or was never started (no %LOCALAPPDATA%\openvr\openvrpaths.vrpath). Install SteamVR from Steam and start it once."
-}
-
+# Desktop+ is informational: only needed to see the PC desktop in VR.
 if ($Video) {
-    Note "preset: VR video (-Video): Desktop+ is optional, desktop layer off, 120 Mbit/s, no idle standby"
+    $checks += @{ Name = "Desktop+"; Ok = $true; Detail = "not needed with -Video"; Fix = ""; Blocking = $false }
 } else {
-    # Desktop+ is only needed to see the PC desktop in VR.
     $pfx = Get-ProgramFilesX86
     $vdf = $null
     if ($pfx) { $vdf = Join-Path $pfx "Steam\steamapps\libraryfolders.vdf" }
@@ -122,8 +191,54 @@ if ($Video) {
             }
         }
     }
-    if (-not $desktopPlus) {
-        $notes += "Desktop+ is not installed, so the PC desktop will not be visible in VR. Install it from Steam (free, 1494460), start it once, then re-run; or pass -Video to skip it on purpose."
+    if ($desktopPlus) {
+        $checks += @{ Name = "Desktop+"; Ok = $true; Detail = $desktopPlus; Fix = ""; Blocking = $false }
+    } else {
+        $checks += @{ Name = "Desktop+"; Ok = $false; Detail = "not installed"; Blocking = $false
+            Fix = "Only needed to see the PC desktop in VR. Install it from Steam (free, 1494460) and start it once, or pass -Video to skip it on purpose." }
+    }
+}
+
+# openvr submodule: not a download the user does, it is fetched below.
+$openVrHeader = Join-Path $Root "pc\openvr\headers\openvr_driver.h"
+$checks += @{ Name = "openvr headers"; Ok = (Test-Path $openVrHeader); Blocking = $false
+    Detail = $(if (Test-Path $openVrHeader) { "pc\openvr" } else { "pc\openvr is empty (fetched automatically)" })
+    Fix = "Nothing to do: setup-pc.ps1 runs 'git submodule update --init' (needs git in PATH)." }
+
+# Disk space: informational, the build writes a few GB into this repository.
+$repoDrive = (Get-Item $Root).PSDrive
+$systemDriveName = "C"
+if ($env:SystemDrive) { $systemDriveName = $env:SystemDrive.TrimEnd(':') }
+$systemFree = "?"
+$system = Get-PSDrive $systemDriveName -ErrorAction SilentlyContinue
+if ($system) { $systemFree = [math]::Round($system.Free / 1GB, 1) }
+$checks += @{ Name = "Disk space"; Ok = $true; Blocking = $false; Fix = ""
+    Detail = "$($repoDrive.Name): $([math]::Round($repoDrive.Free / 1GB, 1)) GB free (repository); $($systemDriveName): $systemFree GB free" }
+
+# -Check: report and stop here, before anything is built or registered.
+if ($Check) {
+    Write-Host ""
+    $failed = Show-CheckList $checks
+    Write-Host ""
+    if ($failed -eq 0) {
+        Write-Host "Ready to build. Run: powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1" -ForegroundColor Green
+        exit 0
+    }
+    Write-Host "Fix the items marked [miss] above, then run this check again." -ForegroundColor Yellow
+    exit 1
+}
+
+$problems = @()
+$notes = @()
+foreach ($check in $checks) {
+    if (-not $check.Ok) {
+        if ($check.Blocking) { $problems += "$($check.Name): $($check.Detail). $($check.Fix)" }
+        else { $notes += "$($check.Name): $($check.Detail). $($check.Fix)" }
+    }
+}
+foreach ($check in $checks) {
+    if ($check.Ok -and $check.Name -eq "CMake" -and $check.Detail -like "*[Visual Studio]*") {
+        Note "using the CMake that ships with Visual Studio: $($check.Detail -replace ' \[[^\]]+\]$', '')"
     }
 }
 

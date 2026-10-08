@@ -9,7 +9,7 @@
       Wave_Native_SDK\samples\wvr_flow_probe\app\build\outputs\apk\bit64\debug\app-bit64-debug.apk
       pc\flow_desktop_streamer\bin\Release\...           (only with -WithDesktopStreamer)
 
-    Requirements: see README.md ("建置環境").
+    Requirements: see README.md ("Build environment").
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\build.ps1

@@ -146,6 +146,14 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-flow.ps1 -Launch
 powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Video
 ```
 
+**不确定工具都装齐了没？**先跑一次纯检查（什么都不建、什么都不装）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Check
+```
+
+它会逐项列出找到什么（路径、版本、大小），以及缺的东西怎么装；全部就绪时退出码为 0。
+
 两步合成一步：`powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 [-Video]`。
 
 更短的清单（人一共要动几次手）见 **`SETUP.md`**。
@@ -158,6 +166,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Video
 
 | 步骤 | 内容 |
 |---|---|
+| `-Check` | 只检查：逐项报告找到了什么（cmake/VS 的路径、Wave SDK 的 aar 与大小、Android SDK/NDK 的路径与 `Pkg.Revision`、JDK 8 路径）、磁盘剩余空间，以及缺的每一项怎么装。不建置、不注册；全就绪时退出码 0 |
 | 前置检查 | 一次列全缺少的东西（cmake、VS2022、SteamVR、Desktop+、Wave SDK、Android SDK/NDK、JDK 8）并写明怎么装；不会只停在第一个错误 |
 | 子模块 | 自动 `git submodule update --init` 取得 `pc/openvr` |
 | 建置 | 调用 `build.ps1`：驱动 + 背景程序 + Flow APK（三个产物见下表） |
@@ -399,6 +408,8 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 
 ### 建置
 
+- **先跑 `setup-pc.ps1 -Check`**：它会告诉你到底缺哪个、缺在哪、怎么装（比逐项手动确认快）。
+- **`cmake not found`**：装 Build Tools 时 CMake 不会进 PATH。脚本会自动找到 VS/Build Tools 内附的那份；若真没有，`winget install Kitware.CMake` 或重跑安装器勾「对 C++ 的 CMake 工具」。
 - **建置驱动失败（文件被锁定）**：先关闭 SteamVR（`setup-pc.ps1` 会自己检查并提示）。
 - **`JDK 8 not found`**：`JAVA_HOME` 指向 JRE 而不是 JDK（要 `bin\javac.exe`），或版本不是 1.8。
 - **`Wave SDK missing`**：`Wave_Native_SDK\repo\com\htc\vr\wvr_client` 不存在（见“Wave SDK”）。

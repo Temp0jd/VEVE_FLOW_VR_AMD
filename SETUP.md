@@ -17,7 +17,7 @@
 | 要什么 | 去哪拿 |
 |---|---|
 | Steam + SteamVR | Steam |
-| Desktop+ （免费,app 1494460） | Steam。**只在需要「在头显里看 PC 桌面」时装**;只看影片可跳过 |
+| Desktop+ （免费,app 1494460） | Steam。**只在需要「在头显里看 PC 桌面」时装**;只看视频可跳过 |
 | Visual Studio 2022 + 「使用 C++ 的桌面开发」 | 微软官网,Community 版免费 |
 | Android Studio（含 SDK platform-tools） | 安卓开发者官网 |
 | Android NDK **21.4.7075529** | Android Studio 的 SDK Manager |
@@ -28,20 +28,44 @@
 
 ## 1. 机器端（一次）
 
+**先确认工具都装齐了**（推荐先跑这一条，什么都不建、什么都不装）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Check
+```
+
+它会逐项列出找到什么、缺什么、怎么装，例如：
+
+```
+  [ ok ] CMake                    D:\VS2022\...\CMake\bin\cmake.exe [Visual Studio]
+  [ ok ] VS 2022 / Build Tools    D:\VS2022
+  [ ok ] SteamVR                  C:\Program Files (x86)\Steam\steamapps\common\SteamVR
+  [miss] Wave SDK                 Wave_Native_SDK\repo\com\htc\vr\wvr_client is missing or empty
+         -> Download 'Wave Native SDK 4.5.0' from https://developer.vive.com ...
+  [ ok ] Android NDK              D:\Android\Sdk\ndk\21.4.7075529 (Pkg.Revision = 21.4.7075529)
+  [miss] JDK 8                    not found
+         -> Set JAVA_HOME to a JDK 8, or unpack Temurin JDK 8 into tools\jdk8\<jdk> ...
+  [ -- ] Desktop+                 not needed with -Video
+
+  4 of 10 checks passed; 2 blocking item(s) to fix.   （全就绪时退出码 0）
+```
+
+就绪了就做正式安装：
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1
 ```
 
 它按顺序做:
 
-1. **前置检查**:缺什么一次列全(不会只停在第一个错误);
+1. **前置检查**:缺什么一次列全(不会只停在第一个错误);也可以单独跑 `-Check` 先看一眼
 2. 自动取 `pc/openvr` 子模组;
 3. 建置驱动 + 后台程序 + **Flow 的 APK**(APK 是「产物」,装到头显上是第 2 步的事);
 4. `install.ps1 -SkipApk`:注册驱动、写 SteamVR 设定、套用 Desktop+ 设定、注册后台程序;
 5. **开防火墙**(需要管理员权限;不是管理员会提示你在管理员 PowerShell 里再跑一次);
 6. 验证并印出结果。
 
-只看 VR 影片:
+只看 VR 视频:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Video
@@ -83,9 +107,9 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-flow.ps1 -Launch
 
 ---
 
-## 4. 只看 VR 影片（DeoVR 之类）
+## 4. 只看 VR 视频（DeoVR 之类）
 
-这是这台设备最合适的用途:**180°/360° 影片只需要头部旋转**,正好是 Flow 唯一有的追踪方式。
+这是这台设备最合适的用途:**180°/360° 视频只需要头部旋转**,正好是 Flow 唯一有的追踪方式。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Video
@@ -115,7 +139,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-flow.ps1 -Launch
 
 1. 一次性:装上面表格里的工具(脚本会告诉你缺哪个,自己确认版本不用做)。
 2. 一次性:下载 Wave SDK 的 `repo` 放到 `Wave_Native_SDK\repo`。
-3. 一次:`setup-pc.ps1`(若提示需要管理员,用管理员 PowerShell 再跑一次以加防火墙规则)。
+3. 一次:`setup-pc.ps1 -Check` 确认工具齐了 → 再 `setup-pc.ps1`(若提示需要管理员,用管理员 PowerShell 再跑一次以加防火墙规则)。
 4. 一次:插 USB 跑 `setup-flow.ps1`,头显上点一次「允许 USB 调试」。
 5. 每次:`setup-flow.ps1 -Launch`(或在头显点一次 Flow Probe 图示)。
 

@@ -90,20 +90,25 @@ $checks = @()
 # CMake: from PATH, or the copy bundled with Visual Studio / Build Tools.
 $cmake = Find-Cmake
 if ($cmake) {
-    $checks += @{ Name = "CMake"; Ok = $true; Detail = "$($cmake.Path) [$($cmake.Source)]"; Fix = ""; Blocking = $needsBuild }
+    $checks += @{ Name = "CMake"; Ok = $true; Detail = "$($cmake.Path) [$($cmake.Source)]"; Source = $cmake.Source; Fix = ""; Blocking = $needsBuild }
     if ($cmake.Source -eq "Visual Studio") {
         # build.ps1 runs as a child process and inherits this.
         $env:PATH = (Split-Path $cmake.Path) + ";" + $env:PATH
     }
 } else {
-    $checks += @{ Name = "CMake"; Ok = $false; Detail = "not found"; Blocking = $needsBuild
+    $checks += @{ Name = "CMake"; Ok = $false; Detail = "not found"; Source = ""; Blocking = $needsBuild
         Fix = "Install it (winget install Kitware.CMake), or add the 'C++ CMake tools for Windows' component when installing Visual Studio / Build Tools." }
 }
 
-# Visual Studio 2022 (or the standalone Build Tools) with the C++ toolchain.
-$visualStudio = Get-VisualStudioPath
+# Visual Studio 2022 (or the standalone Build Tools) with the C++ toolchain. The instance details
+# matter: CMake is told to use this exact instance, because its own discovery misses an install in
+# a non-default folder and misses Build Tools ('could not find any instance of Visual Studio').
+$visualStudio = Get-VisualStudioInstance
 if ($visualStudio) {
-    $checks += @{ Name = "VS 2022 / Build Tools"; Ok = $true; Detail = $visualStudio; Fix = ""; Blocking = $needsBuild }
+    $name = $visualStudio.DisplayName
+    if (-not $name) { $name = "Visual Studio / Build Tools" }
+    $checks += @{ Name = "VS 2022 / Build Tools"; Ok = $true; Fix = ""; Blocking = $needsBuild
+        Detail = "$($visualStudio.Path) - $name $($visualStudio.Version)" }
 } else {
     $checks += @{ Name = "VS 2022 / Build Tools"; Ok = $false; Detail = "C++ toolchain not found"; Blocking = $needsBuild
         Fix = "Install Visual Studio 2022 with the 'Desktop development with C++' workload (Community edition is free), or the Build Tools for Visual Studio 2022 with the same workload." }
@@ -245,7 +250,7 @@ foreach ($item in $checks) {
     if (-not $item.Ok) {
         if ($item.Blocking) { $problems += "$($item.Name): $($item.Detail). $($item.Fix)" }
         else { $notes += "$($item.Name): $($item.Detail). $($item.Fix)" }
-    } elseif ($item.Name -eq "CMake" -and $item.Detail -like "*[Visual Studio]*") {
+    } elseif ($item.Name -eq "CMake" -and $item.Source -eq "Visual Studio") {
         Note "using the CMake that ships with Visual Studio: $($item.Detail -replace ' \[[^\]]+\]$', '')"
     }
 }

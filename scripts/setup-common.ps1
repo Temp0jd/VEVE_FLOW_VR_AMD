@@ -99,10 +99,12 @@ function Get-Jdk8Candidates([string]$root) {
 
 # Output of "<folder>\bin\java.exe -version", or $null when there is no java there.
 function Get-JavaVersion([string]$folder) {
-    $java = Join-Path $folder "bin\java.exe"
-    if (-not (Test-Path $java)) { return $null }
-    # via cmd: in Windows PowerShell 5.1, redirecting a native exe's stderr throws under "Stop"
-    return (cmd /c "`"$java`" -version 2>&1" | Out-String)
+    $java = Join-SafePath $folder "bin\java.exe"
+    if (-not (Test-SafePath $java)) { return $null }
+    # via cmd: in Windows PowerShell 5.1, redirecting a native exe's stderr throws under "Stop".
+    # cmd always exists on Windows; elsewhere there is no java.exe either, so a throw is fine to
+    # swallow into "no version".
+    try { return (cmd /c "`"$java`" -version 2>&1" | Out-String) } catch { return $null }
 }
 
 function Find-Jdk8([string]$root) {
@@ -127,20 +129,45 @@ function Describe-Jdk8Problem([string]$root) {
         if ($version -and ($version -match 'version "1\.8')) { continue } # usable, keep looking
         $found = "unknown"
         if ($version -and ($version -match 'version "([^"]+)"')) { $found = $Matches[1] }
+        if ($found -eq "unknown") { return "$candidate has bin\javac.exe but its version could not be read; 1.8 is required." }
         return "$candidate is Java $found, but 1.8 is required."
     }
     return ""
 }
 
-# Visual Studio's own toolchain (full IDE or the standalone Build Tools); $null when neither is
-# installed. Build Tools installs the same vswhere and component IDs, so it is found here too.
-function Get-VisualStudioPath {
+# Test-Path that also survives a path on a drive that does not exist: with
+# $ErrorActionPreference = "Stop" (as the setup scripts set it), Test-Path throws instead of
+# returning false when the drive is gone, e.g. a Visual Studio install on an unplugged drive.
+function Test-SafePath([string]$path) {
+    if (-not $path) { return $false }
+    try { return [bool](Test-Path -LiteralPath $path) } catch { return $false }
+}
+
+# Join-Path that returns $null instead of throwing for an unreachable base path.
+function Join-SafePath([string]$base, [string]$child) {
+    if (-not (Test-SafePath $base)) { return $null }
+    try { return (Join-Path $base $child) } catch { return $null }
+}
+
+# Details of the newest Visual Studio / Build Tools installation that has the C++ toolchain, or
+# $null when there is none. vswhere is part of the Visual Studio Installer and is the same tool
+# CMake uses internally.
+function Get-VisualStudioInstance {
     $pfx = Get-ProgramFilesX86
     if (-not $pfx) { return $null }
     $vswhere = Join-Path $pfx "Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) { return $null }
-    $path = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if ($path) { return $path }
+    $arguments = @("-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64")
+    $path = & $vswhere @arguments -property installationPath
+    if (-not $path) { return $null }
+    $version = & $vswhere @arguments -property installationVersion
+    $name = & $vswhere @arguments -property displayName
+    return @{ Path = "$path".Trim(); Version = "$version".Trim(); DisplayName = "$name".Trim() }
+}
+
+function Get-VisualStudioPath {
+    $instance = Get-VisualStudioInstance
+    if ($instance) { return $instance.Path }
     return $null
 }
 
@@ -156,9 +183,28 @@ function Find-Cmake {
     if ($inPath) { return @{ Path = $inPath; Source = "PATH" } }
     $vs = Get-VisualStudioPath
     if ($vs) {
-        $bundled = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-        if (Test-Path $bundled) { return @{ Path = $bundled; Source = "Visual Studio" } }
+        $bundled = Join-SafePath $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+        if (Test-SafePath $bundled) { return @{ Path = $bundled; Source = "Visual Studio" } }
     }
+    return $null
+}
+
+# Ninja that ships with Visual Studio / Build Tools (they place it next to the CMake they bundle).
+function Find-Ninja {
+    $inPath = Find-InPath @("ninja", "ninja.exe")
+    if ($inPath) { return $inPath }
+    $vs = Get-VisualStudioPath
+    if ($vs) {
+        $bundled = Join-SafePath $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+        if (Test-SafePath $bundled) { return $bundled }
+    }
+    return $null
+}
+
+# vcvars64.bat of the given instance: it puts cl.exe, link.exe and ninja on PATH for a shell.
+function Get-VcVarsPath([string]$vsPath) {
+    $candidate = Join-SafePath $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+    if (Test-SafePath $candidate) { return $candidate }
     return $null
 }
 

@@ -27,6 +27,10 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
+# Shared helpers (Find-Cmake, Get-VisualStudioInstance, Find-Jdk8, Find-AndroidSdk, ...). Its
+# Step/Fail/Warn are overridden by the definitions right below, which is intended.
+. (Join-Path $PSScriptRoot "setup-common.ps1")
+
 function Step($text) { Write-Host ""; Write-Host "==> $text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
 
@@ -35,10 +39,24 @@ function Invoke-Checked([string]$exe, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { Fail "$exe $($arguments -join ' ') failed (exit $LASTEXITCODE)" }
 }
 
+# The Visual Studio instance to build with, resolved once by vswhere.
+$vsInstance = Get-VisualStudioInstance
+
 function Build-CMakeProject([string]$sourceDir) {
     $buildDir = Join-Path $sourceDir "build"
     if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
-        Invoke-Checked "cmake" @("-S", $sourceDir, "-B", $buildDir, "-G", $Generator, "-A", "x64")
+        $configure = @("-S", $sourceDir, "-B", $buildDir, "-G", $Generator, "-A", "x64")
+        if ($vsInstance -and $Generator -like "Visual Studio*") {
+            # Pin the instance we found with vswhere. CMake's own discovery reports "could not find
+            # any instance of Visual Studio" when Visual Studio is installed outside its default
+            # folder, or when only the Build Tools are installed, even though the toolchain is
+            # there. A location plus the build number is the documented way to name an instance.
+            $instance = $vsInstance.Path
+            if ($vsInstance.Version) { $instance = "$instance,version=$($vsInstance.Version)" }
+            $configure += @("-DCMAKE_GENERATOR_INSTANCE=$instance")
+            Write-Host "Using Visual Studio at $($vsInstance.Path) ($($vsInstance.DisplayName))"
+        }
+        Invoke-Checked "cmake" $configure
     }
     Invoke-Checked "cmake" @("--build", $buildDir, "--config", "Release")
 }
@@ -46,21 +64,10 @@ function Build-CMakeProject([string]$sourceDir) {
 # cmake: from PATH, or the copy bundled with Visual Studio / Build Tools ("C++ CMake tools for
 # Windows"). Installing only the Build Tools without a separate CMake is common.
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-    $pfx = ${env:ProgramFiles(x86)}
-    if (-not $pfx) { $pfx = $env:ProgramFiles }
-    $vs = $null
-    if ($pfx) {
-        $vswhere = Join-Path $pfx "Microsoft Visual Studio\Installer\vswhere.exe"
-        if (Test-Path $vswhere) {
-            $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        }
-    }
-    if ($vs) {
-        $bundled = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
-        if (Test-Path (Join-Path $bundled "cmake.exe")) {
-            $env:PATH = $bundled + ";" + $env:PATH
-            Write-Host "Using the CMake that ships with Visual Studio: $bundled"
-        }
+    $cmake = Find-Cmake
+    if ($cmake) {
+        $env:PATH = (Split-Path $cmake.Path) + ";" + $env:PATH
+        Write-Host "Using the CMake that ships with Visual Studio: $($cmake.Path)"
     }
 }
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
@@ -95,40 +102,19 @@ if (-not $SkipApk) {
     }
 
     # Android Gradle Plugin 3.5 needs a JDK 8 (javac, not just a JRE): JAVA_HOME if it is one,
-    # else tools\jdk8\<jdk>.
-    $javaHome = $null
-    if ($env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME "bin\javac.exe"))) {
-        # via cmd: in Windows PowerShell 5.1, redirecting a native exe's stderr throws under "Stop"
-        $version = cmd /c "`"$(Join-Path $env:JAVA_HOME 'bin\java.exe')`" -version 2>&1" | Out-String
-        if ($version -match 'version "1\.8') { $javaHome = $env:JAVA_HOME }
-    }
+    # else tools\jdk8 (see Find-Jdk8 in setup-common.ps1).
+    $javaHome = Find-Jdk8 $Root
     if (-not $javaHome) {
-        # tools\jdk8\<jdk>\, tools\jdk8\ itself, or one level under tools\ (an archive unpacked
-        # a level too high). The version is checked so a stray folder cannot be picked up, and a
-        # JRE is told apart from a missing JDK.
-        $candidates = @()
-        foreach ($base in @((Join-Path $Root "tools\jdk8"), (Join-Path $Root "tools"))) {
-            $candidates += $base
-            foreach ($dir in (Get-ChildItem $base -Directory -ErrorAction SilentlyContinue)) { $candidates += $dir.FullName }
-        }
-        $jreFound = $null
-        foreach ($candidate in $candidates) {
-            $java = Join-Path $candidate "bin\java.exe"
-            if (-not (Test-Path $java)) { continue }
-            if (-not (Test-Path (Join-Path $candidate "bin\javac.exe"))) { $jreFound = $candidate; continue }
-            $version = cmd /c "`"$java`" -version 2>&1" | Out-String
-            if ($version -match 'version "1\.8') { $javaHome = $candidate; break }
-        }
-        if ($jreFound) { Fail "$jreFound is a JRE (bin\java.exe without bin\javac.exe). Install the Temurin JDK 8, not the JRE." }
+        $why = Describe-Jdk8Problem $Root
+        if ($why) { Fail "$why Install the Temurin JDK 8 (not the JRE) and set JAVA_HOME to it, or unpack it into $Root\tools\jdk8." }
+        Fail "JDK 8 not found. Set JAVA_HOME to a JDK 8, or unpack the Temurin JDK 8 (not the JRE) into $Root\tools\jdk8 (the folder holding bin\java.exe and bin\javac.exe)."
     }
-    if (-not $javaHome) { Fail "JDK 8 not found. Set JAVA_HOME to a JDK 8, or unpack the Temurin JDK 8 (not the JRE) into $Root\tools\jdk8 (the folder holding bin\java.exe and bin\javac.exe)." }
 
     # local.properties is machine specific (ignored by git): write it from the Android SDK location.
-    $sdk = @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME, (Join-Path $env:LOCALAPPDATA "Android\Sdk")) |
-        Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    $sdk = Find-AndroidSdk
     if (-not $sdk) { Fail "Android SDK not found. Install it (Android Studio) or set ANDROID_SDK_ROOT." }
-    $ndk = Join-Path $sdk "ndk\21.4.7075529"
-    if (-not (Test-Path $ndk)) {
+    $ndk = Find-AndroidNdk $sdk
+    if (-not $ndk) {
         $installedNdk = @(Get-ChildItem (Join-Path $sdk "ndk") -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
         $found = "none installed"
         if ($installedNdk.Count -gt 0) { $found = "found: $($installedNdk -join ', ')" }

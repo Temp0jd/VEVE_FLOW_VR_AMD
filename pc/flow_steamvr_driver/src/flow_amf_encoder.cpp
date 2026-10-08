@@ -254,9 +254,12 @@ struct FlowAmfEncoder::Impl
 	std::deque< uint64_t > pending_pts;
 	std::deque< std::pair< uint64_t, std::vector< uint8_t > > > ready_packets;
 	uint64_t dropped_packets = 0;
-	// How many packets have been checked for SPS/PPS, so the outcome is reported exactly once.
-	uint32_t packets_scanned = 0;
+	// SPS/PPS in Annex B form, taken from AMF's read-only ExtraData property after Init (AMF does
+	// not put them in the stream itself). See Initialize.
+	std::vector< uint8_t > parameter_sets;
+	uint32_t packets_checked = 0;
 	bool parameter_sets_reported = false;
+	bool parameter_sets_prepended = false;
 	std::string last_error;
 };
 
@@ -581,6 +584,27 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 		Shutdown();
 		return false;
 	}
+	// SPS/PPS: AMF leaves them out of the stream (AMF_VIDEO_ENCODER_INSERT_SPS/PPS default to false)
+	// and exposes them through the read-only ExtraData property instead. FFmpeg's AMF encoder reads
+	// exactly this property straight after Init() and treats the buffer as extradata; the same
+	// buffer is what FLOWH264 needs, because the driver scans a packet for SPS *and* PPS to build
+	// the stream header the Flow's decoder is configured from. The interface is released by hand,
+	// as in FFmpeg's C code, so the value is read into a plain AMFVariantStruct.
+	AMFVariantStruct variant = {};
+	if ( impl.encoder->GetProperty( AMF_VIDEO_ENCODER_EXTRADATA, &variant ) == AMF_OK &&
+	     variant.type == AMF_VARIANT_INTERFACE && variant.pInterface != nullptr )
+	{
+		AMFBuffer *buffer = nullptr;
+		if ( variant.pInterface->QueryInterface( AMFBuffer::IID(), reinterpret_cast< void ** >( &buffer ) ) == AMF_OK &&
+		     buffer != nullptr && buffer->GetSize() > 0 && buffer->GetNative() != nullptr )
+		{
+			const auto *bytes = static_cast< const uint8_t * >( buffer->GetNative() );
+			impl.parameter_sets.assign( bytes, bytes + buffer->GetSize() );
+			buffer->Release();
+		}
+		variant.pInterface->Release();
+	}
+
 	// Dynamic property: let QueryOutput wait for the bitstream instead of spinning.
 	impl.encoder->SetProperty( AMF_VIDEO_ENCODER_QUERY_TIMEOUT, static_cast< amf_int64 >( kQueryTimeoutMs ) );
 
@@ -601,8 +625,8 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 	}
 
 	impl.last_error.clear();
-	DriverLog( "Flow AMF initialized H264 %ux%u@%u bitrate=%u preset=%lld level=%lld", width, height, fps, bitrate,
-	           static_cast< long long >( quality ), static_cast< long long >( level ) );
+	DriverLog( "Flow AMF initialized H264 %ux%u@%u bitrate=%u preset=%lld level=%lld extra_data=%zu bytes", width, height, fps,
+	           bitrate, static_cast< long long >( quality ), static_cast< long long >( level ), impl.parameter_sets.size() );
 	return true;
 }
 
@@ -698,25 +722,6 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 		}
 	}
 
-	if ( !impl.parameter_sets_reported && !impl.ready_packets.empty() )
-	{
-		++impl.packets_scanned;
-		const auto &first = impl.ready_packets.front().second;
-		const NalSummary nals = SummarizeNals( first.data(), first.size() );
-		if ( nals.sps && nals.pps )
-		{
-			impl.parameter_sets_reported = true;
-			DriverLog( "Flow AMF: packets carry SPS and PPS (nal types %s); the driver can build the stream header",
-			           nals.types.c_str() );
-		}
-		else if ( impl.packets_scanned >= 150 ) // ~2 s at 75 fps
-		{
-			impl.parameter_sets_reported = true;
-			DriverLog( "Flow AMF: no SPS/PPS in %u packets (nal types %s) - the Flow cannot decode this stream",
-			           impl.packets_scanned, nals.types.c_str() );
-		}
-	}
-
 	if ( !impl.ready_packets.empty() )
 	{
 		out_packet = std::move( impl.ready_packets.front().second );
@@ -725,6 +730,45 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 			*out_pts_us = impl.ready_packets.front().first;
 		}
 		impl.ready_packets.pop_front();
+
+		// The driver builds the FLOWH264 stream header from the first packet that carries both SPS
+		// and PPS (EnsureH264StreamHeader), and the Flow's decoder is configured from that header.
+		// AMF exposes the parameter sets through ExtraData instead of the stream, so make the packet
+		// look like the NVENC backend's output - parameter sets ahead of the frame - whenever the
+		// encoder's own output does not already contain them. Only the driver's NAL scan and the
+		// optional stream dump see this: SendH264Packet forwards just the VCL NALs.
+		if ( !impl.parameter_sets.empty() )
+		{
+			const NalSummary nals = SummarizeNals( out_packet.data(), out_packet.size() );
+			if ( !( nals.sps && nals.pps ) )
+			{
+				out_packet.insert( out_packet.begin(), impl.parameter_sets.begin(), impl.parameter_sets.end() );
+				if ( !impl.parameter_sets_prepended )
+				{
+					impl.parameter_sets_prepended = true;
+					DriverLog( "Flow AMF: prepended %zu bytes of SPS/PPS from ExtraData (encoder nal types %s)",
+					           impl.parameter_sets.size(), nals.types.c_str() );
+				}
+			}
+		}
+
+		// Report once whether the packets really do carry the parameter sets the Flow needs.
+		if ( !impl.parameter_sets_reported )
+		{
+			++impl.packets_checked;
+			const NalSummary nals = SummarizeNals( out_packet.data(), out_packet.size() );
+			if ( nals.sps && nals.pps )
+			{
+				impl.parameter_sets_reported = true;
+				DriverLog( "Flow AMF: outgoing packets carry SPS and PPS (nal types %s)", nals.types.c_str() );
+			}
+			else if ( impl.packets_checked >= 150 ) // ~2 s at 75 fps
+			{
+				impl.parameter_sets_reported = true;
+				DriverLog( "Flow AMF: no SPS/PPS in %u packets (nal types %s, extra data %zu bytes) - the Flow cannot decode this stream",
+				           impl.packets_checked, nals.types.c_str(), impl.parameter_sets.size() );
+			}
+		}
 	}
 	return true;
 }

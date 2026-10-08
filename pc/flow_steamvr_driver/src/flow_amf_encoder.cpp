@@ -247,6 +247,11 @@ struct FlowAmfEncoder::Impl
 	// without waiting on this the encoder reads the untouched (black) surface every frame.
 	ID3D11Query *conversion_done = nullptr;
 	bool conversion_wait_reported = false;
+	// The D3D11 texture behind the AMF surface the encoder reads (borrowed from its plane), and its
+	// DXGI format: the per-frame copy is only possible when that layout matches the converted NV12.
+	ID3D11Texture2D *surface_texture = nullptr;
+	DXGI_FORMAT surface_format = DXGI_FORMAT_UNKNOWN;
+	bool surface_copy_logged = false;
 	ID3D11VertexShader *vertex_shader = nullptr;
 	ID3D11PixelShader *luma_shader = nullptr;
 	ID3D11PixelShader *chroma_shader = nullptr;
@@ -572,7 +577,16 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 		Shutdown();
 		return false;
 	}
-	result = impl.context->InitDX11( device );
+	// AMF's D3D11 context has two capability levels and the default is the lower one
+	// (AMF_DX11_0). FFmpeg's AMF integration asks for AMF_DX11_1, which is what makes the newer
+	// D3D11 interop paths - including NV12 textures - available, so ask for that and fall back.
+	AMF_DX_VERSION dx_version = AMF_DX11_1;
+	result = impl.context->InitDX11( device, dx_version );
+	if ( result != AMF_OK )
+	{
+		dx_version = AMF_DX11_0;
+		result = impl.context->InitDX11( device, dx_version );
+	}
 	if ( result != AMF_OK )
 	{
 		SetStatusError( "AMF InitDX11", result );
@@ -692,18 +706,47 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 		return false;
 	}
 
-	// Wrap our NV12 texture: the hardware encoder reads it directly, no copy.
-	result = impl.context->CreateSurfaceFromDX11Native( impl.nv12_texture, &impl.surface, nullptr );
+	// The encoder's input surface: AMF allocates it and EncodeTexture copies the converted frame in.
+	// Wrapping the texture this backend renders into produced a surface the encoder read as empty;
+	// the conversion itself is provably correct, because reading that very texture back shows a full
+	// 16..235 range while the encoded frames are black. So hand the encoder a surface it owns.
+	result = impl.context->AllocSurface( AMF_MEMORY_DX11, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
+	                                     static_cast< amf_int32 >( height ), &impl.surface );
 	if ( result != AMF_OK )
 	{
-		SetStatusError( "AMF CreateSurfaceFromDX11Native", result );
+		SetStatusError( "AMF AllocSurface(NV12, DX11)", result );
 		Shutdown();
 		return false;
 	}
 
+	// The texture behind that surface, and its DXGI format: the copy is only possible when the
+	// layouts match, and the format is what tells us whether they do.
+	if ( impl.surface->GetPlanesCount() > 0 )
+	{
+		AMFPlane *plane = impl.surface->GetPlaneAt( 0 );
+		if ( plane != nullptr )
+		{
+			impl.surface_texture = static_cast< ID3D11Texture2D * >( plane->GetNative() );
+		}
+	}
+	if ( impl.surface_texture != nullptr )
+	{
+		D3D11_TEXTURE2D_DESC surface_desc{};
+		impl.surface_texture->GetDesc( &surface_desc );
+		impl.surface_format = surface_desc.Format;
+		DriverLog( "Flow AMF: encoder surface %ux%u dxgi_format=%u (converted NV12 is %u)", surface_desc.Width,
+		           surface_desc.Height, static_cast< unsigned >( surface_desc.Format ),
+		           static_cast< unsigned >( DXGI_FORMAT_NV12 ) );
+	}
+	else
+	{
+		DriverLog( "Flow AMF: encoder surface exposes no native DX11 texture; cannot copy into it" );
+	}
+
 	impl.last_error.clear();
-	DriverLog( "Flow AMF initialized H264 %ux%u@%u bitrate=%u preset=%lld level=%lld extra_data=%zu bytes", width, height, fps,
-	           bitrate, static_cast< long long >( quality ), static_cast< long long >( level ), impl.parameter_sets.size() );
+	DriverLog( "Flow AMF initialized H264 %ux%u@%u bitrate=%u preset=%lld level=%lld extra_data=%zu bytes dx=%lld", width, height,
+	           fps, bitrate, static_cast< long long >( quality ), static_cast< long long >( level ),
+	           impl.parameter_sets.size(), static_cast< long long >( dx_version ) );
 	return true;
 }
 
@@ -729,6 +772,24 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 			return false;
 		}
 
+		// Copy the converted frame into the encoder's own surface (see Initialize for why the surface
+		// is not the texture this backend renders into).
+		if ( impl.surface_texture != nullptr && impl.surface_format == DXGI_FORMAT_NV12 )
+		{
+			impl.device_context->CopyResource( impl.surface_texture, impl.nv12_texture );
+			if ( !impl.surface_copy_logged )
+			{
+				impl.surface_copy_logged = true;
+				DriverLog( "Flow AMF: copying the converted NV12 into the AMF surface every frame" );
+			}
+		}
+		else if ( !impl.surface_copy_logged )
+		{
+			impl.surface_copy_logged = true;
+			DriverLog( "Flow AMF: encoder surface is not DXGI_FORMAT_NV12 (%u), so no copy happens and the encoder reads an empty surface",
+			           static_cast< unsigned >( impl.surface_format ) );
+		}
+
 		// Wait for the conversion to actually finish on the GPU before handing the surface to AMF.
 		// Flush() alone is not enough: it queues the commands but returns immediately, and the encoder
 		// reads the surface from its own engine, so it would otherwise encode the untouched surface -
@@ -748,7 +809,7 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 			if ( ready == S_FALSE && !impl.conversion_wait_reported )
 			{
 				impl.conversion_wait_reported = true;
-				DriverLog( "Flow AMF: the NV12 conversion did not finish within 50 ms; the encoder may read a stale surface" );
+				DriverLog( "Flow AMF: the NV12 conversion and copy did not finish within 50 ms; the encoder may read a stale surface" );
 			}
 		}
 		else

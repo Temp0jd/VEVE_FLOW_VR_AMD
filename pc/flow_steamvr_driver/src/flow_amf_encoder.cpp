@@ -170,6 +170,18 @@ namespace
 		return summary;
 	}
 
+	// Row-wise copy that tolerates different pitches: the staging texture's rows are padded, and the
+	// AMF host plane's rows have their own pitch (see amf_copy_surface in FFmpeg's amfenc.c).
+	void CopyPlaneRows( const uint8_t *src, size_t src_pitch, uint8_t *dst, size_t dst_pitch, size_t row_bytes, size_t rows )
+	{
+		const size_t bytes = row_bytes < src_pitch ? row_bytes : src_pitch;
+		const size_t line = bytes < dst_pitch ? bytes : dst_pitch;
+		for ( size_t y = 0; y < rows; ++y )
+		{
+			std::memcpy( dst + y * dst_pitch, src + y * src_pitch, line );
+		}
+	}
+
 	// Lowest H.264 level that can carry this stream. The limits are macroblocks per second and per
 	// frame, and the obvious 5.1 is not enough for 3200x1600 at 75 fps: 20,000 macroblocks a frame is
 	// 1,500,000 a second, while level 5.1 allows 983,040 and level 5.2 allows 2,073,600 - which is
@@ -252,6 +264,15 @@ struct FlowAmfEncoder::Impl
 	ID3D11Texture2D *surface_texture = nullptr;
 	DXGI_FORMAT surface_format = DXGI_FORMAT_UNKNOWN;
 	bool surface_copy_logged = false;
+	// Input surface in system memory, which is the path FFmpeg's AMF encoder uses: the converted NV12
+	// is read back from a staging texture into the surface's own planes. On the hardware this was
+	// tested on, a DX11 surface written by a 3D copy is read by the encoder as empty (black frames
+	// with no error anywhere), which is why the host path is preferred.
+	bool host_surface = false;
+	AMFPlane *host_y_plane = nullptr;  // borrowed from the surface
+	AMFPlane *host_uv_plane = nullptr; // borrowed from the surface
+	ID3D11Texture2D *staging_texture = nullptr;
+	bool host_copy_logged = false;
 	ID3D11VertexShader *vertex_shader = nullptr;
 	ID3D11PixelShader *luma_shader = nullptr;
 	ID3D11PixelShader *chroma_shader = nullptr;
@@ -361,6 +382,21 @@ bool FlowAmfEncoder::CreateConversionResources()
 		return false;
 	}
 
+	// A readback target for the host-memory input surface.
+	D3D11_TEXTURE2D_DESC staging_desc{};
+	staging_desc.Width = impl.width;
+	staging_desc.Height = impl.height;
+	staging_desc.MipLevels = 1;
+	staging_desc.ArraySize = 1;
+	staging_desc.Format = DXGI_FORMAT_NV12;
+	staging_desc.SampleDesc.Count = 1;
+	staging_desc.Usage = D3D11_USAGE_STAGING;
+	staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	if ( FAILED( impl.device->CreateTexture2D( &staging_desc, nullptr, &impl.staging_texture ) ) )
+	{
+		impl.staging_texture = nullptr; // the host path is then unavailable; the DX11 one is used
+	}
+
 	// Completion marker for the conversion, waited on before every submit (see EncodeTexture).
 	D3D11_QUERY_DESC query_desc{};
 	query_desc.Query = D3D11_QUERY_EVENT;
@@ -441,6 +477,7 @@ void FlowAmfEncoder::ReleaseConversionResources()
 	SafeRelease( impl.chroma_target );
 	SafeRelease( impl.luma_target );
 	SafeRelease( impl.conversion_done );
+	SafeRelease( impl.staging_texture );
 	SafeRelease( impl.nv12_texture );
 	if ( impl.device_context != nullptr )
 	{
@@ -706,41 +743,71 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 		return false;
 	}
 
-	// The encoder's input surface: AMF allocates it and EncodeTexture copies the converted frame in.
-	// Wrapping the texture this backend renders into produced a surface the encoder read as empty;
-	// the conversion itself is provably correct, because reading that very texture back shows a full
-	// 16..235 range while the encoded frames are black. So hand the encoder a surface it owns.
-	result = impl.context->AllocSurface( AMF_MEMORY_DX11, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
-	                                     static_cast< amf_int32 >( height ), &impl.surface );
-	if ( result != AMF_OK )
+	// The encoder's input surface. System memory first, matching FFmpeg's AMF encoder: on the tested
+	// hardware a DX11 surface - even one AMF allocated itself - is read by the encoder as empty, and
+	// the stream comes out black with no error anywhere. EncodeTexture fills these planes from the
+	// converted NV12 through a staging texture.
+	impl.surface = nullptr;
+	if ( impl.staging_texture != nullptr )
 	{
-		SetStatusError( "AMF AllocSurface(NV12, DX11)", result );
-		Shutdown();
-		return false;
-	}
-
-	// The texture behind that surface, and its DXGI format: the copy is only possible when the
-	// layouts match, and the format is what tells us whether they do.
-	if ( impl.surface->GetPlanesCount() > 0 )
-	{
-		AMFPlane *plane = impl.surface->GetPlaneAt( 0 );
-		if ( plane != nullptr )
+		result = impl.context->AllocSurface( AMF_MEMORY_HOST, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
+		                                     static_cast< amf_int32 >( height ), &impl.surface );
+		if ( result == AMF_OK && impl.surface != nullptr && impl.surface->GetPlanesCount() >= 2 )
 		{
-			impl.surface_texture = static_cast< ID3D11Texture2D * >( plane->GetNative() );
+			impl.host_y_plane = impl.surface->GetPlaneAt( 0 );
+			impl.host_uv_plane = impl.surface->GetPlaneAt( 1 );
+			impl.host_surface = impl.host_y_plane != nullptr && impl.host_uv_plane != nullptr &&
+			                    impl.host_y_plane->GetNative() != nullptr && impl.host_uv_plane->GetNative() != nullptr;
 		}
 	}
-	if ( impl.surface_texture != nullptr )
+
+	if ( impl.host_surface )
 	{
-		D3D11_TEXTURE2D_DESC surface_desc{};
-		impl.surface_texture->GetDesc( &surface_desc );
-		impl.surface_format = surface_desc.Format;
-		DriverLog( "Flow AMF: encoder surface %ux%u dxgi_format=%u (converted NV12 is %u)", surface_desc.Width,
-		           surface_desc.Height, static_cast< unsigned >( surface_desc.Format ),
-		           static_cast< unsigned >( DXGI_FORMAT_NV12 ) );
+		DriverLog( "Flow AMF: input surface is AMF_MEMORY_HOST %ux%u (the frame reaches the encoder through system memory)",
+		           width, height );
 	}
 	else
 	{
-		DriverLog( "Flow AMF: encoder surface exposes no native DX11 texture; cannot copy into it" );
+		if ( impl.surface != nullptr )
+		{
+			impl.surface->Release();
+			impl.surface = nullptr;
+		}
+		impl.host_y_plane = nullptr;
+		impl.host_uv_plane = nullptr;
+		DriverLog( "Flow AMF: host-memory input surface unavailable; using a DX11 surface" );
+		result = impl.context->AllocSurface( AMF_MEMORY_DX11, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
+		                                     static_cast< amf_int32 >( height ), &impl.surface );
+		if ( result != AMF_OK )
+		{
+			SetStatusError( "AMF AllocSurface(NV12, DX11)", result );
+			Shutdown();
+			return false;
+		}
+
+		// The texture behind that surface, and its DXGI format: the copy is only possible when the
+		// layouts match, and the format is what tells us whether they do.
+		if ( impl.surface->GetPlanesCount() > 0 )
+		{
+			AMFPlane *plane = impl.surface->GetPlaneAt( 0 );
+			if ( plane != nullptr )
+			{
+				impl.surface_texture = static_cast< ID3D11Texture2D * >( plane->GetNative() );
+			}
+		}
+		if ( impl.surface_texture != nullptr )
+		{
+			D3D11_TEXTURE2D_DESC surface_desc{};
+			impl.surface_texture->GetDesc( &surface_desc );
+			impl.surface_format = surface_desc.Format;
+			DriverLog( "Flow AMF: encoder surface %ux%u dxgi_format=%u array=%u mips=%u (converted NV12 is %u)", surface_desc.Width,
+			           surface_desc.Height, static_cast< unsigned >( surface_desc.Format ), surface_desc.ArraySize,
+			           surface_desc.MipLevels, static_cast< unsigned >( DXGI_FORMAT_NV12 ) );
+		}
+		else
+		{
+			DriverLog( "Flow AMF: encoder surface exposes no native DX11 texture; cannot copy into it" );
+		}
 	}
 
 	impl.last_error.clear();
@@ -773,8 +840,33 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 		}
 
 		// Copy the converted frame into the encoder's own surface (see Initialize for why the surface
-		// is not the texture this backend renders into).
-		if ( impl.surface_texture != nullptr && impl.surface_format == DXGI_FORMAT_NV12 )
+		// is either in system memory or a DX11 texture AMF allocated).
+		if ( impl.host_surface )
+		{
+			impl.device_context->CopyResource( impl.staging_texture, impl.nv12_texture );
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if ( FAILED( impl.device_context->Map( impl.staging_texture, 0, D3D11_MAP_READ, 0, &mapped ) ) )
+			{
+				SetError( "mapping the NV12 staging texture failed" );
+				return false;
+			}
+			const auto *source = static_cast< const uint8_t * >( mapped.pData );
+			auto *y_destination = static_cast< uint8_t * >( impl.host_y_plane->GetNative() );
+			auto *uv_destination = static_cast< uint8_t * >( impl.host_uv_plane->GetNative() );
+			const size_t y_pitch = static_cast< size_t >( impl.host_y_plane->GetHPitch() );
+			const size_t uv_pitch = static_cast< size_t >( impl.host_uv_plane->GetHPitch() );
+			CopyPlaneRows( source, mapped.RowPitch, y_destination, y_pitch, impl.width, impl.height );
+			CopyPlaneRows( source + static_cast< size_t >( impl.height ) * mapped.RowPitch, mapped.RowPitch, uv_destination, uv_pitch,
+			               impl.width, impl.height / 2 );
+			if ( !impl.host_copy_logged )
+			{
+				impl.host_copy_logged = true;
+				DriverLog( "Flow AMF: uploading the converted NV12 into the host surface (y_pitch=%zu uv_pitch=%zu staging_pitch=%u)",
+				           y_pitch, uv_pitch, mapped.RowPitch );
+			}
+			impl.device_context->Unmap( impl.staging_texture, 0 );
+		}
+		else if ( impl.surface_texture != nullptr && impl.surface_format == DXGI_FORMAT_NV12 )
 		{
 			impl.device_context->CopyResource( impl.surface_texture, impl.nv12_texture );
 			if ( !impl.surface_copy_logged )

@@ -100,13 +100,34 @@ function Find-Jdk8([string]$root) {
     return $null
 }
 
-function Test-VisualStudio {
+# Visual Studio's own toolchain (full IDE or the standalone Build Tools); $null when neither is
+# installed. Build Tools installs the same vswhere and component IDs, so it is found here too.
+function Get-VisualStudioPath {
     $pfx = Get-ProgramFilesX86
-    if (-not $pfx) { return $false }
+    if (-not $pfx) { return $null }
     $vswhere = Join-Path $pfx "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path $vswhere)) { return $false }
+    if (-not (Test-Path $vswhere)) { return $null }
     $path = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    return [bool]$path
+    if ($path) { return $path }
+    return $null
+}
+
+function Test-VisualStudio {
+    return [bool](Get-VisualStudioPath)
+}
+
+# cmake from PATH, or the copy that ships with Visual Studio / Build Tools (the "C++ CMake tools
+# for Windows" component). Installing Build Tools without a separate CMake is common, and the
+# build needs cmake on PATH.
+function Find-Cmake {
+    $inPath = Find-InPath @("cmake", "cmake.exe")
+    if ($inPath) { return @{ Path = $inPath; Source = "PATH" } }
+    $vs = Get-VisualStudioPath
+    if ($vs) {
+        $bundled = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+        if (Test-Path $bundled) { return @{ Path = $bundled; Source = "Visual Studio" } }
+    }
+    return $null
 }
 
 function Test-Elevated {

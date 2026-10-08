@@ -72,8 +72,13 @@ $problems = @()
 $notes = @()
 
 if (-not $SkipBuild) {
-    if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-        $problems += "cmake not in PATH. Install it (winget install Kitware.CMake) or use the one from Visual Studio's CMake component and add it to PATH."
+    $cmake = Find-Cmake
+    if (-not $cmake) {
+        $problems += "cmake not found. Install it (winget install Kitware.CMake), or add the 'C++ CMake tools for Windows' component when installing Visual Studio / Build Tools."
+    } elseif ($cmake.Source -eq "Visual Studio") {
+        # build.ps1 runs as a child process and inherits this.
+        $env:PATH = (Split-Path $cmake.Path) + ";" + $env:PATH
+        Note "using the CMake that ships with Visual Studio: $($cmake.Path)"
     }
     if (-not (Test-VisualStudio)) {
         $problems += "Visual Studio 2022 with the 'Desktop development with C++' workload not found (the Community edition is free). cmake needs its compiler."

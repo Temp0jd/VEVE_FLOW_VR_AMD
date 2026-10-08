@@ -43,7 +43,29 @@ function Build-CMakeProject([string]$sourceDir) {
     Invoke-Checked "cmake" @("--build", $buildDir, "--config", "Release")
 }
 
-if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { Fail "cmake not found in PATH" }
+# cmake: from PATH, or the copy bundled with Visual Studio / Build Tools ("C++ CMake tools for
+# Windows"). Installing only the Build Tools without a separate CMake is common.
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    $pfx = ${env:ProgramFiles(x86)}
+    if (-not $pfx) { $pfx = $env:ProgramFiles }
+    $vs = $null
+    if ($pfx) {
+        $vswhere = Join-Path $pfx "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vswhere) {
+            $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        }
+    }
+    if ($vs) {
+        $bundled = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+        if (Test-Path (Join-Path $bundled "cmake.exe")) {
+            $env:PATH = $bundled + ";" + $env:PATH
+            Write-Host "Using the CMake that ships with Visual Studio: $bundled"
+        }
+    }
+}
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    Fail "cmake not found in PATH. Install CMake (winget install Kitware.CMake) or add the 'C++ CMake tools for Windows' component to Visual Studio / Build Tools."
+}
 
 # The driver DLL and helper exe are locked while SteamVR runs.
 if ((-not $SkipDriver -or -not $SkipHelper) -and (Get-Process vrserver, flow_dashboard_helper -ErrorAction SilentlyContinue)) {

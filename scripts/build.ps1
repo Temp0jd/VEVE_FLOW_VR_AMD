@@ -103,10 +103,18 @@ if (-not $SkipApk) {
         if ($version -match 'version "1\.8') { $javaHome = $env:JAVA_HOME }
     }
     if (-not $javaHome) {
-        $bundled = Get-ChildItem (Join-Path $Root "tools\jdk8") -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($bundled) { $javaHome = $bundled.FullName }
+        # tools\jdk8\<jdk>\ , and tools\jdk8\ itself for an archive unpacked without its own
+        # folder. The version is checked so a stray folder there cannot be picked up.
+        $bundledRoot = Join-Path $Root "tools\jdk8"
+        $candidates = @($bundledRoot) + @(Get-ChildItem $bundledRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        foreach ($candidate in $candidates) {
+            $java = Join-Path $candidate "bin\java.exe"
+            if (-not (Test-Path (Join-Path $candidate "bin\javac.exe"))) { continue }
+            $version = cmd /c "`"$java`" -version 2>&1" | Out-String
+            if ($version -match 'version "1\.8') { $javaHome = $candidate; break }
+        }
     }
-    if (-not $javaHome) { Fail "JDK 8 not found. Set JAVA_HOME to a JDK 8, or unpack Temurin JDK 8 into tools\jdk8\ (see README)." }
+    if (-not $javaHome) { Fail "JDK 8 not found. Set JAVA_HOME to a JDK 8, or unpack Temurin JDK 8 into $Root\tools\jdk8 (the folder holding bin\java.exe and bin\javac.exe)." }
 
     # local.properties is machine specific (ignored by git): write it from the Android SDK location.
     $sdk = @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME, (Join-Path $env:LOCALAPPDATA "Android\Sdk")) |

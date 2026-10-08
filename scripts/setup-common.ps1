@@ -87,8 +87,11 @@ function Find-Adb {
 function Find-Jdk8([string]$root) {
     $candidates = @()
     if ($env:JAVA_HOME) { $candidates += $env:JAVA_HOME }
-    $bundled = Get-ChildItem (Join-Path $root "tools\jdk8") -Directory -ErrorAction SilentlyContinue
-    foreach ($dir in $bundled) { $candidates += $dir.FullName }
+    # tools\jdk8\<jdk>\ , and tools\jdk8\ itself for an archive unpacked without its own
+    # folder (then bin\java.exe sits directly in tools\jdk8).
+    $bundledRoot = Join-Path $root "tools\jdk8"
+    $candidates += $bundledRoot
+    foreach ($dir in (Get-ChildItem $bundledRoot -Directory -ErrorAction SilentlyContinue)) { $candidates += $dir.FullName }
     foreach ($candidate in $candidates) {
         $java = Join-Path $candidate "bin\java.exe"
         if (-not (Test-Path (Join-Path $candidate "bin\javac.exe"))) { continue }

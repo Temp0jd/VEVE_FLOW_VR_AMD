@@ -776,6 +776,19 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 	// path needs no copy at all. AMF allocating the surface itself is the fallback - on the tested
 	// hardware the encoder then reads it as empty.
 	impl.surface = nullptr;
+	// AMF has to be told which slice of the wrapped texture to read. FFmpeg sets this private data on
+	// every D3D11 texture it hands over, and the GUID is not in AMF's public headers - it is
+	// hard-coded in FFmpeg's amfenc.c (AMFTextureArrayIndexGUID). This texture has a single slice, so
+	// the index is 0. Without it AMF's own detection decides, and on the tested hardware that ends up
+	// reading the wrapped texture as empty: a black stream with valid parameter sets, while the same
+	// picture through AMF's own host-memory surfaces works.
+	{
+		static const GUID texture_array_index_guid = { 0x28115527, 0xe7c3, 0x4b66, { 0x99, 0xd3, 0x4f, 0x2a, 0xe6, 0xb4, 0x7f, 0xaf } };
+		const int32_t texture_array_index = 0;
+		const HRESULT private_data = impl.nv12_texture->SetPrivateData( texture_array_index_guid, sizeof( texture_array_index ),
+		                                                                &texture_array_index );
+		DriverLog( "Flow AMF: texture array index private data %s", SUCCEEDED( private_data ) ? "set (index 0)" : "rejected by the texture" );
+	}
 	result = impl.context->CreateSurfaceFromDX11Native( impl.nv12_texture, &impl.surface, nullptr );
 	if ( result == AMF_OK && impl.surface != nullptr && impl.surface->GetPlanesCount() > 0 )
 	{

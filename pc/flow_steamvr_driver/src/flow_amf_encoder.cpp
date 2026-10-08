@@ -260,6 +260,8 @@ struct FlowAmfEncoder::Impl
 	uint32_t packets_checked = 0;
 	bool parameter_sets_reported = false;
 	bool parameter_sets_prepended = false;
+	// One-off check that the BGRA -> NV12 conversion really wrote an image (see RenderNv12).
+	bool conversion_checked = false;
 	std::string last_error;
 };
 
@@ -299,6 +301,9 @@ bool FlowAmfEncoder::CreateConversionResources()
 	desc.SampleDesc.Count = 1;
 	desc.Usage = D3D11_USAGE_DEFAULT;
 	desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+	// No D3D11_RESOURCE_MISC_SHARED: AMF's CreateSurfaceFromDX11Native is handed this texture
+	// pointer and wraps it in-process, so no sharing is involved (FFmpeg's D3D11 hwcontext makes
+	// that flag opt-in too).
 	if ( FAILED( impl.device->CreateTexture2D( &desc, nullptr, &impl.nv12_texture ) ) )
 	{
 		SetError( "CreateTexture2D(NV12) failed" );
@@ -435,6 +440,14 @@ bool FlowAmfEncoder::RenderNv12( ID3D11Texture2D *texture )
 	}
 
 	ID3D11DeviceContext *dc = impl.device_context;
+	// This runs on the same immediate context as the driver's own scaling work, so the state must be
+	// set explicitly rather than inherited: a scissor-enabled rasterizer state with the default
+	// (empty) scissor rect clips the whole draw away and leaves the plane zeroed, and an inherited
+	// alpha-blending state can discard the write the same way - both look exactly like "the encoder
+	// is being fed a black image".
+	dc->RSSetState( nullptr );
+	dc->OMSetBlendState( nullptr, nullptr, 0xffffffff );
+	dc->OMSetDepthStencilState( nullptr, 0 );
 	dc->IASetInputLayout( nullptr );
 	dc->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
 	dc->VSSetShader( impl.vertex_shader, nullptr, 0 );
@@ -463,7 +476,55 @@ bool FlowAmfEncoder::RenderNv12( ID3D11Texture2D *texture )
 
 	ID3D11ShaderResourceView *null_view = nullptr;
 	dc->PSSetShaderResources( 0, 1, &null_view );
+	// Leave no render target of ours bound for the render thread to inherit.
+	dc->OMSetRenderTargets( 0, nullptr, nullptr );
 	source_view->Release();
+
+	// Once, read the luma plane back and report what the conversion actually produced. This is the
+	// difference between "the draw wrote nothing" and "AMF read an empty surface", which is
+	// otherwise invisible: either way the encoder happily encodes a black frame.
+	if ( !impl.conversion_checked )
+	{
+		impl.conversion_checked = true;
+		D3D11_TEXTURE2D_DESC staging_desc{};
+		staging_desc.Width = impl.width;
+		staging_desc.Height = impl.height;
+		staging_desc.MipLevels = 1;
+		staging_desc.ArraySize = 1;
+		staging_desc.Format = DXGI_FORMAT_NV12;
+		staging_desc.SampleDesc.Count = 1;
+		staging_desc.Usage = D3D11_USAGE_STAGING;
+		staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		ID3D11Texture2D *snapshot = nullptr;
+		if ( SUCCEEDED( impl.device->CreateTexture2D( &staging_desc, nullptr, &snapshot ) ) && snapshot != nullptr )
+		{
+			dc->CopyResource( snapshot, impl.nv12_texture );
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if ( SUCCEEDED( dc->Map( snapshot, 0, D3D11_MAP_READ, 0, &mapped ) ) )
+			{
+				const auto *rows = static_cast< const uint8_t * >( mapped.pData );
+				uint32_t min_value = 255;
+				uint32_t max_value = 0;
+				uint64_t total = 0;
+				for ( uint32_t y = 0; y < impl.height; ++y )
+				{
+					const uint8_t *row = rows + static_cast< size_t >( y ) * mapped.RowPitch;
+					for ( uint32_t x = 0; x < impl.width; ++x )
+					{
+						const uint32_t value = row[ x ];
+						min_value = value < min_value ? value : min_value;
+						max_value = value > max_value ? value : max_value;
+						total += value;
+					}
+				}
+				const uint64_t samples = static_cast< uint64_t >( impl.width ) * impl.height;
+				DriverLog( "Flow AMF: converted NV12 luma min=%u max=%u avg=%llu (%ux%u)", min_value, max_value,
+				           static_cast< unsigned long long >( total / ( samples > 0 ? samples : 1 ) ), impl.width, impl.height );
+				dc->Unmap( snapshot, 0 );
+			}
+			snapshot->Release();
+		}
+	}
 	return true;
 }
 

@@ -553,7 +553,59 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 | `pc/flowvr/resources/input/*.json` | SteamVR 输入绑定（Index 控制器、键盘鼠标、HMD） |
 | `flow_probe/` | 从 Flow 采集的硬件信息（编解码器、显示器、传感器、OEM 套件），仅供参考；含设备序号的 `getprop.txt` 不公开 |
 
-## 附录 C：授权与致谢
+## 附录 C：文件与安装位置
+
+> 不想记这些？跑一次 `scripts\setup-pc.ps1 -Check`，它会把每一项的**实际路径**（以及缺的怎么装）印出来。
+
+### 需要你自己放的两项
+
+| 东西 | 放哪 | 脚本怎么找 |
+|---|---|---|
+| **Wave SDK 的 `repo`** | `<仓库>\Wave_Native_SDK\repo\`（压缩包里 `repo` 旁边的 `LICENSE` 一起放） | 固定路径（`build.gradle` 里写死 `url "$rootDir/../../repo"`） |
+| **JDK 8** | 设 `JAVA_HOME` 指向它，**或**解压到 `<仓库>\tools\jdk8\<任意名>\` | 先 `JAVA_HOME`（且 `java -version` 是 `1.8`），否则取 `tools\jdk8\` 下第一个目录 |
+
+两者都在 `.gitignore` 里：重新 clone 仓库后要再放一次。
+
+### 装在系统里、脚本自己去找的
+
+| 东西 | 装哪 | 脚本怎么找 |
+|---|---|---|
+| Visual Studio 2022 / Build Tools + CMake | 安装时你选的盘 | `vswhere -requires …VC.Tools.x86.x64`；CMake 先看 PATH，再看 VS / Build Tools 内附的那份 |
+| Android SDK + platform-tools（adb） | 安装时你选的盘 | `ANDROID_SDK_ROOT` → `ANDROID_HOME` → `%LOCALAPPDATA%\Android\Sdk` |
+| Android NDK | 必须在 `<SDK>\ndk\21.4.7075529\` | 固定相对路径（`build.ps1` 会把它写进 `local.properties` 的 `ndk.dir`） |
+| SteamVR | Steam 的安装位置 | `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`（需启动过一次） |
+| Desktop+ | Steam 库 | `libraryfolders.vdf` → `steamapps\common\DesktopPlus`（`-Video` 不需要） |
+
+### 由 git 自动取的（不用你下载）
+
+| 东西 | 位置 | 说明 |
+|---|---|---|
+| OpenVR SDK | `<仓库>\pc\openvr\` | `setup-pc.ps1` 自动跑 `git submodule update --init` |
+| NVENC / AMF 头文件 | `<仓库>\pc\third_party\` | 已在仓库里 |
+
+### 建置产物（都在仓库里，都在 `.gitignore` 内）
+
+| 产物 | 路径 |
+|---|---|
+| SteamVR 驱动（注册的就是这个目录） | `pc\flow_steamvr_driver\build\dist\flowvr\` |
+| 驱动日志与画质诊断档 | `pc\flow_steamvr_driver\build\dist\flowvr\logs\` |
+| 背景程序（与它的日志） | `pc\flow_dashboard_helper\build\dist\` |
+| Flow APK | `Wave_Native_SDK\samples\wvr_flow_probe\app\build\outputs\apk\bit64\debug\app-bit64-debug.apk` |
+| Android 中间产物 | `Wave_Native_SDK\samples\wvr_flow_probe\app\build\`、`.cxx\`、`.externalNativeBuild\` |
+| Gradle 缓存 | `%USERPROFILE%\.gradle`（可用 `GRADLE_USER_HOME` 挪到别的盘） |
+| `local.properties`（机器相关，`build.ps1` 自动生成） | `Wave_Native_SDK\samples\wvr_flow_probe\local.properties` |
+
+### 日志与备份
+
+| 东西 | 位置 |
+|---|---|
+| SteamVR 主日志（驱动与手部记录都在里面） | `<SteamVR>\logs\vrserver.txt` |
+| 背景程序日志 | `pc\flow_dashboard_helper\build\dist\flow_dashboard_helper.log` |
+| 安装时的设定备份（`install.ps1` 建立） | `steamvr.vrsettings.bak-veve`、Desktop+ `config.ini.bak-veve` |
+
+---
+
+## 附录 D：授权与致谢
 
 - 上游项目：[`Mmc1xs/VEVE_FLOW_VR`](https://github.com/Mmc1xs/VEVE_FLOW_VR)（设计、驱动、Flow App、清晰桌面、手部追踪都出自该作者）。这个 fork 加上 AMD AMF 支持、一键部署脚本与 VR 视频模式。
 - `pc/openvr/`：Valve OpenVR SDK（submodule）。

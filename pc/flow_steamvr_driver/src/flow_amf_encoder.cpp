@@ -839,32 +839,15 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 			return false;
 		}
 
-		// Copy the converted frame into the encoder's own surface (see Initialize for why the surface
-		// is either in system memory or a DX11 texture AMF allocated).
-		if ( impl.host_surface )
+		// Hand the converted frame to the encoder: either into the staging texture that is read back into
+		// the host surface's planes, or into the DX11 surface AMF allocated (see Initialize). Both are
+		// only queued here. The readback itself happens after the wait below: a blocking Map on a copy
+		// that has not been submitted yet is a deadlock, because the encode thread would be waiting for
+		// work that only it could submit.
+		const bool use_host_upload = impl.host_surface;
+		if ( use_host_upload )
 		{
 			impl.device_context->CopyResource( impl.staging_texture, impl.nv12_texture );
-			D3D11_MAPPED_SUBRESOURCE mapped{};
-			if ( FAILED( impl.device_context->Map( impl.staging_texture, 0, D3D11_MAP_READ, 0, &mapped ) ) )
-			{
-				SetError( "mapping the NV12 staging texture failed" );
-				return false;
-			}
-			const auto *source = static_cast< const uint8_t * >( mapped.pData );
-			auto *y_destination = static_cast< uint8_t * >( impl.host_y_plane->GetNative() );
-			auto *uv_destination = static_cast< uint8_t * >( impl.host_uv_plane->GetNative() );
-			const size_t y_pitch = static_cast< size_t >( impl.host_y_plane->GetHPitch() );
-			const size_t uv_pitch = static_cast< size_t >( impl.host_uv_plane->GetHPitch() );
-			CopyPlaneRows( source, mapped.RowPitch, y_destination, y_pitch, impl.width, impl.height );
-			CopyPlaneRows( source + static_cast< size_t >( impl.height ) * mapped.RowPitch, mapped.RowPitch, uv_destination, uv_pitch,
-			               impl.width, impl.height / 2 );
-			if ( !impl.host_copy_logged )
-			{
-				impl.host_copy_logged = true;
-				DriverLog( "Flow AMF: uploading the converted NV12 into the host surface (y_pitch=%zu uv_pitch=%zu staging_pitch=%u)",
-				           y_pitch, uv_pitch, mapped.RowPitch );
-			}
-			impl.device_context->Unmap( impl.staging_texture, 0 );
 		}
 		else if ( impl.surface_texture != nullptr && impl.surface_format == DXGI_FORMAT_NV12 )
 		{
@@ -907,6 +890,34 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 		else
 		{
 			impl.device_context->Flush();
+		}
+
+		// The copy has now been submitted and has completed, so the readback cannot deadlock.
+		// This is the step FFmpeg's AMF encoder does too (amf_copy_surface in amfenc.c): write the
+		// frame into the planes the host surface exposes.
+		if ( use_host_upload )
+		{
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if ( FAILED( impl.device_context->Map( impl.staging_texture, 0, D3D11_MAP_READ, 0, &mapped ) ) )
+			{
+				SetError( "mapping the NV12 staging texture failed" );
+				return false;
+			}
+			const auto *source = static_cast< const uint8_t * >( mapped.pData );
+			auto *y_destination = static_cast< uint8_t * >( impl.host_y_plane->GetNative() );
+			auto *uv_destination = static_cast< uint8_t * >( impl.host_uv_plane->GetNative() );
+			const size_t y_pitch = static_cast< size_t >( impl.host_y_plane->GetHPitch() );
+			const size_t uv_pitch = static_cast< size_t >( impl.host_uv_plane->GetHPitch() );
+			CopyPlaneRows( source, mapped.RowPitch, y_destination, y_pitch, impl.width, impl.height );
+			CopyPlaneRows( source + static_cast< size_t >( impl.height ) * mapped.RowPitch, mapped.RowPitch, uv_destination, uv_pitch,
+			               impl.width, impl.height / 2 );
+			if ( !impl.host_copy_logged )
+			{
+				impl.host_copy_logged = true;
+				DriverLog( "Flow AMF: uploading the converted NV12 into the host surface (y_pitch=%zu uv_pitch=%zu staging_pitch=%u)",
+				           y_pitch, uv_pitch, mapped.RowPitch );
+			}
+			impl.device_context->Unmap( impl.staging_texture, 0 );
 		}
 
 		impl.surface->SetPts( static_cast< amf_pts >( pts_us ) * 10 ); // amf_pts counts 100 ns

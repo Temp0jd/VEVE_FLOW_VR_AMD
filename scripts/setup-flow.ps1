@@ -165,7 +165,9 @@ foreach ($match in [regex]::Matches($addresses, 'inet (\d+\.\d+\.\d+\.\d+)')) {
     $candidate = $match.Groups[1].Value
     if ($candidate -notlike "127.*") { $flowIp = $candidate; break }
 }
-$pcAddresses = Get-PcIPv4
+# @(): with one address Get-PcIPv4 returns a bare string, and $pcAddresses[0] would then be its
+# first character ("192.168.31.33"[0] is "1"), which is what made the ping below target "1".
+$pcAddresses = @(Get-PcIPv4)
 $sameSubnet = $false
 if ($flowIp -and $pcAddresses.Count -eq 0) {
     Warn "could not read this PC's IPv4 address; the subnet check was skipped"
@@ -184,10 +186,21 @@ if ($flowIp -and $pcAddresses.Count -eq 0) {
     Warn "could not read an IP from the Flow (Wi-Fi off?). PC addresses: $($pcAddresses -join ', ')"
 }
 if ($sameSubnet -and $pcAddresses.Count -gt 0) {
-    # Informational only: Windows blocks inbound ICMP by default, so a failed ping proves nothing.
-    $ping = (& $adb shell ping -c 2 -W 2 $pcAddresses[0] 2>&1) | Out-String
+    # Informational only: Windows blocks inbound ICMP by default. A native command that writes to
+    # stderr produces an error record, which terminates the script under
+    # $ErrorActionPreference = "Stop", so neither its output nor its failure may escape here.
+    $target = $pcAddresses[0]
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $ping = (& $adb shell ping -c 2 -W 2 $target 2>&1 | Out-String)
+    } catch {
+        $ping = ""
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
     if ($ping -match "0% packet loss|2 received|2 packets received") {
-        Note "the Flow can ping this PC ($($pcAddresses[0]))"
+        Note "the Flow can ping this PC ($target)"
     } else {
         Note "the Flow could not ping this PC; that is normal (Windows blocks ping by default) and not a problem."
     }

@@ -116,6 +116,59 @@ namespace
 		}
 	}
 
+	// The NAL types present in an Annex-B buffer, and whether SPS (7) and PPS (8) are among them.
+	// This mirrors the rule the driver applies in EnsureH264StreamHeader, which needs both in one
+	// packet before it can send the FLOWH264 stream header the Flow's decoder is configured from -
+	// without that header the headset has nothing to decode and shows an uninitialised surface.
+	struct NalSummary
+	{
+		bool sps = false;
+		bool pps = false;
+		std::string types;
+	};
+
+	NalSummary SummarizeNals( const uint8_t *data, size_t size )
+	{
+		NalSummary summary;
+		size_t i = 0;
+		while ( i + 3 < size )
+		{
+			size_t header = 0;
+			if ( data[ i ] == 0 && data[ i + 1 ] == 0 && data[ i + 2 ] == 1 )
+			{
+				header = i + 3;
+			}
+			else if ( i + 4 < size && data[ i ] == 0 && data[ i + 1 ] == 0 && data[ i + 2 ] == 0 && data[ i + 3 ] == 1 )
+			{
+				header = i + 4;
+			}
+			if ( header == 0 || header >= size )
+			{
+				++i;
+				continue;
+			}
+			const int type = data[ header ] & 0x1f;
+			if ( type >= 1 && type <= 12 )
+			{
+				if ( type == 7 )
+				{
+					summary.sps = true;
+				}
+				if ( type == 8 )
+				{
+					summary.pps = true;
+				}
+				if ( !summary.types.empty() )
+				{
+					summary.types += ",";
+				}
+				summary.types += std::to_string( type );
+			}
+			i = header + 1;
+		}
+		return summary;
+	}
+
 	// Lowest H.264 level that can carry this stream. The limits are macroblocks per second and per
 	// frame, and the obvious 5.1 is not enough for 3200x1600 at 75 fps: 20,000 macroblocks a frame is
 	// 1,500,000 a second, while level 5.1 allows 983,040 and level 5.2 allows 2,073,600 - which is
@@ -201,6 +254,9 @@ struct FlowAmfEncoder::Impl
 	std::deque< uint64_t > pending_pts;
 	std::deque< std::pair< uint64_t, std::vector< uint8_t > > > ready_packets;
 	uint64_t dropped_packets = 0;
+	// How many packets have been checked for SPS/PPS, so the outcome is reported exactly once.
+	uint32_t packets_scanned = 0;
+	bool parameter_sets_reported = false;
 	std::string last_error;
 };
 
@@ -485,6 +541,12 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 	    set_property( AMF_VIDEO_ENCODER_USAGE, AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY, "Usage", true ) &&
 	    set_property( AMF_VIDEO_ENCODER_PROFILE, AMF_VIDEO_ENCODER_PROFILE_HIGH, "Profile", true ) &&
 	    set_property( AMF_VIDEO_ENCODER_PROFILE_LEVEL, level, "ProfileLevel", true ) &&
+	    // AMF leaves both of these off by default, which produces a stream with slices but no
+	    // parameter sets at all: nothing can decode it, and the driver cannot build the FLOWH264
+	    // stream header (it needs SPS and PPS in the same packet). They are mandatory here because a
+	    // stream without them is not usable.
+	    set_property( AMF_VIDEO_ENCODER_INSERT_SPS, true, "InsertSPS", true ) &&
+	    set_property( AMF_VIDEO_ENCODER_INSERT_PPS, true, "InsertPPS", true ) &&
 	    set_property( AMF_VIDEO_ENCODER_FRAMESIZE, AMFConstructSize( static_cast< amf_int32 >( width ), static_cast< amf_int32 >( height ) ),
 	                  "FrameSize", true ) &&
 	    set_property( AMF_VIDEO_ENCODER_FRAMERATE, AMFConstructRate( fps, 1 ), "FrameRate", true ) &&
@@ -627,13 +689,31 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 		buffer->Release();
 	}
 
-	while ( impl.ready_packets.size() > kMaxReadyPackets )
-	{
+	while ( impl.ready_packets.size() > kMaxReadyPackets )	{
 		impl.ready_packets.pop_front();
 		++impl.dropped_packets;
 		if ( impl.dropped_packets == 1 )
 		{
 			DriverLog( "Flow AMF: encoder falling behind; dropping the oldest packet" );
+		}
+	}
+
+	if ( !impl.parameter_sets_reported && !impl.ready_packets.empty() )
+	{
+		++impl.packets_scanned;
+		const auto &first = impl.ready_packets.front().second;
+		const NalSummary nals = SummarizeNals( first.data(), first.size() );
+		if ( nals.sps && nals.pps )
+		{
+			impl.parameter_sets_reported = true;
+			DriverLog( "Flow AMF: packets carry SPS and PPS (nal types %s); the driver can build the stream header",
+			           nals.types.c_str() );
+		}
+		else if ( impl.packets_scanned >= 150 ) // ~2 s at 75 fps
+		{
+			impl.parameter_sets_reported = true;
+			DriverLog( "Flow AMF: no SPS/PPS in %u packets (nal types %s) - the Flow cannot decode this stream",
+			           impl.packets_scanned, nals.types.c_str() );
 		}
 	}
 

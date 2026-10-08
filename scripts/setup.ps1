@@ -29,7 +29,9 @@ param(
     [switch]$SkipInstall,
     [switch]$NoFirewall,
     [switch]$WithDesktopStreamer,
-    [switch]$Launch
+    [switch]$Launch,
+    # Passed to setup-pc.ps1 / build.ps1: Gradle distribution mirror (see README troubleshooting).
+    [string]$GradleDistributionUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,6 +46,7 @@ if ($SkipApk) { $pcArgs += "-SkipApk" }
 if ($SkipInstall) { $pcArgs += "-SkipInstall" }
 if ($NoFirewall) { $pcArgs += "-NoFirewall" }
 if ($WithDesktopStreamer) { $pcArgs += "-WithDesktopStreamer" }
+if ($GradleDistributionUrl) { $pcArgs += @("-GradleDistributionUrl", $GradleDistributionUrl) }
 & powershell @pcArgs
 if ($LASTEXITCODE -ne 0) {
     Fail "the PC half failed; fix the items it listed and run this script again (it picks up where it left off)."

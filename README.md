@@ -409,6 +409,15 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 ### 建置
 
 - **先跑 `setup-pc.ps1 -Check`**：它会告诉你到底缺哪个、缺在哪、怎么装（比逐项手动确认快）。
+- **`Downloading https://services.gradle.org/...` 之后连接超时**（中国大陆常见，这个域名不通）：把 Gradle 发行版换成镜像。腾讯 / 华为 / 阿里云都镜像了它，而且与官方 **逐字节一致**（`gradle-5.6.1-all.zip` 的 sha256 是 `f6ea7f48e2823ca7ff8481044b892b24112f5c2c3547d4f423fb9e684c39f710`）：
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Video -GradleDistributionUrl https://mirrors.cloud.tencent.com/gradle/gradle-5.6.1-all.zip
+  ```
+
+  或者先在别处（或下载工具）下好，指向本地档：`-GradleDistributionUrl file:///D:/downloads/gradle-5.6.1-all.zip`
+  （脚本会把这一行写进 `Wave_Native_SDK\samples\wvr_flow_probe\gradle\wrapper\gradle-wrapper.properties`；想还原就 `git checkout --` 该档。`build.ps1` 与 `setup.ps1` 也接受同一个参数。）
+- **依赖解析失败（`Could not resolve ...`）**：发行版下来了，但 `google()` / `mavenCentral()` / `jcenter()` 不通 → 设代理再跑：`$env:HTTPS_PROXY = 'http://127.0.0.1:7890'`
 - **`cmake not found`**：装 Build Tools 时 CMake 不会进 PATH。脚本会自动找到 VS/Build Tools 内附的那份；若真没有，`winget install Kitware.CMake` 或重跑安装器勾「对 C++ 的 CMake 工具」。
 - **`could not find any instance of Visual Studio`**：Visual Studio 装在**非默认目录**（例如 `D:\VS2022`）或只装了 **Build Tools** 时，CMake 自己的实例探测会失效，即使 vswhere 能找到。脚本会把找到的实例直接指给 CMake（`-DCMAKE_GENERATOR_INSTANCE=<路径>,version=<build号>`），不需要重装 VS。
 - **`the version field is not 4 integer components starting in 17`**：装了 **Visual Studio 2026（v18）**，但用了 `Visual Studio 17 2022` 生成器。CMake 的生成器与 VS 版本是绑定的（v18 要用 `Visual Studio 18 2026`，需要 CMake 4.2+）。脚本会**按 vswhere 报的版本自动选生成器**，并在 PATH 里的 CMake 太旧时改用 **VS 内附的那份 CMake**，所以两种 VS 都不用改设定。

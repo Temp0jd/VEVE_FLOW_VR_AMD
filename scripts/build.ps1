@@ -21,7 +21,12 @@ param(
     [switch]$SkipApk,
     [switch]$WithDesktopStreamer,
     # Visual Studio generator for CMake.
-    [string]$Generator = "Visual Studio 17 2022"
+    [string]$Generator = "Visual Studio 17 2022",
+    # Where the Gradle wrapper fetches its distribution from. Needed when
+    # https://services.gradle.org is unreachable (common in mainland China): pass a mirror or a
+    # local file, e.g. https://mirrors.cloud.tencent.com/gradle/gradle-5.6.1-all.zip or
+    # file:///D:/downloads/gradle-5.6.1-all.zip
+    [string]$GradleDistributionUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -191,13 +196,57 @@ if (-not $SkipApk) {
 
     $previousJavaHome = $env:JAVA_HOME
     $env:JAVA_HOME = $javaHome
+
+    # The wrapper downloads the Gradle distribution from services.gradle.org, which some networks
+    # (mainland China in particular) cannot reach. Point it somewhere else when asked.
+    $wrapperProperties = Join-Path $probe "gradle\wrapper\gradle-wrapper.properties"
+    if ($GradleDistributionUrl) {
+        if (-not (Test-Path $wrapperProperties)) { Fail "gradle-wrapper.properties not found at $wrapperProperties" }
+        $url = $GradleDistributionUrl -replace '\\', '/'
+        $properties = Get-Content $wrapperProperties -Raw
+        $patched = $properties -replace '(?m)^distributionUrl=.*$', "distributionUrl=$url"
+        if ($patched -ne $properties) {
+            [IO.File]::WriteAllText($wrapperProperties, $patched)
+            Write-Host "Gradle will be downloaded from $url"
+            Write-Host "  (written into gradle\wrapper\gradle-wrapper.properties; undo with: git checkout -- $wrapperProperties)"
+        }
+    }
+
     Push-Location $probe
+    # Captured as well as shown, so a download failure can be explained instead of just reported.
+    $gradleText = ""
     try {
-        Invoke-Checked ".\gradlew.bat" @("assembleBit64Debug")
+        & .\gradlew.bat assembleBit64Debug 2>&1 | ForEach-Object { $gradleText += "$_`n"; Write-Host $_ }
+        $gradleExit = $LASTEXITCODE
     }
     finally {
         Pop-Location
         $env:JAVA_HOME = $previousJavaHome
+    }
+
+    if ($gradleExit -ne 0) {
+        if (($gradleText -match 'ConnectException|Connection timed out|UnknownHostException|Connection reset') -or
+            ($gradleText -match 'Downloading https://services\.gradle\.org')) {
+            Step "Gradle download problem"
+            Note "services.gradle.org could not be reached, so the Gradle distribution did not download."
+            Note "This is common in mainland China. Three ways out - pick one and run it:"
+            Note ""
+            Note "  1) use a mirror (verified to be byte-identical to the official file):"
+            Note "       powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -GradleDistributionUrl https://mirrors.cloud.tencent.com/gradle/gradle-5.6.1-all.zip"
+            Note "     (https://mirrors.huaweicloud.com/gradle/ and https://mirrors.aliyun.com/gradle/ mirror it too)"
+            Note "     official sha256 of gradle-5.6.1-all.zip:"
+            Note "       f6ea7f48e2823ca7ff8481044b892b24112f5c2c3547d4f423fb9e684c39f710"
+            Note "  2) or download it on another network and use the local file:"
+            Note "       ... -GradleDistributionUrl file:///D:/downloads/gradle-5.6.1-all.zip"
+            Note "  3) or set a proxy for this session and run the same command again."
+            Note ""
+        } elseif ($gradleText -match 'Could not resolve') {
+            Step "Dependency download problem"
+            Note "The Gradle distribution arrived, but resolving the dependencies failed - google()/mavenCentral()/jcenter() were unreachable."
+            Note "A proxy usually fixes this; set it and run the same command again:"
+            Note "    $env:HTTPS_PROXY = 'http://127.0.0.1:7890'   # your proxy address"
+        }
+        Fail ".\gradlew.bat assembleBit64Debug failed (exit $gradleExit)."
     }
 }
 

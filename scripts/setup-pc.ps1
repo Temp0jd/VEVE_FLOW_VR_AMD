@@ -59,7 +59,10 @@ param(
     [switch]$SkipInstall,
     [switch]$NoFirewall,
     [switch]$Check,
-    [switch]$WithDesktopStreamer
+    [switch]$WithDesktopStreamer,
+    # Passed to build.ps1: fetch the Gradle distribution from a mirror when
+    # https://services.gradle.org is unreachable (see README troubleshooting).
+    [string]$GradleDistributionUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -304,6 +307,7 @@ if ($SkipBuild) {
     $buildArgs = @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "build.ps1"))
     if ($SkipApk) { $buildArgs += "-SkipApk" }
     if ($WithDesktopStreamer) { $buildArgs += "-WithDesktopStreamer" }
+    if ($GradleDistributionUrl) { $buildArgs += @("-GradleDistributionUrl", $GradleDistributionUrl) }
     & powershell @buildArgs
     if ($LASTEXITCODE -ne 0) { Fail "build failed (exit $LASTEXITCODE). Scroll up for the first error." }
 }

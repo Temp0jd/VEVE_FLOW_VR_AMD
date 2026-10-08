@@ -743,13 +743,53 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 		return false;
 	}
 
-	// The encoder's input surface. System memory first, matching FFmpeg's AMF encoder: on the tested
-	// hardware a DX11 surface - even one AMF allocated itself - is read by the encoder as empty, and
-	// the stream comes out black with no error anywhere. EncodeTexture fills these planes from the
-	// converted NV12 through a staging texture.
+	// The encoder's input surface. A DX11 surface is preferred: copying into it costs no per-frame
+	// synchronisation or readback at all, and its descriptor is logged so the layout is never a guess.
+	// A system-memory surface (what FFmpeg's AMF encoder uses) is the fallback - EncodeTexture then
+	// reads the converted frame back through a staging texture, which must not be allowed to hold up
+	// the render thread that shares this device context.
 	impl.surface = nullptr;
-	if ( impl.staging_texture != nullptr )
+	result = impl.context->AllocSurface( AMF_MEMORY_DX11, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
+	                                     static_cast< amf_int32 >( height ), &impl.surface );
+	if ( result == AMF_OK && impl.surface != nullptr && impl.surface->GetPlanesCount() > 0 )
 	{
+		AMFPlane *plane = impl.surface->GetPlaneAt( 0 );
+		if ( plane != nullptr )
+		{
+			impl.surface_texture = static_cast< ID3D11Texture2D * >( plane->GetNative() );
+		}
+	}
+	if ( impl.surface_texture != nullptr )
+	{
+		D3D11_TEXTURE2D_DESC surface_desc{};
+		impl.surface_texture->GetDesc( &surface_desc );
+		impl.surface_format = surface_desc.Format;
+		DriverLog( "Flow AMF: encoder surface %ux%u dxgi_format=%u array=%u mips=%u bind=0x%x (converted NV12 is %u)",
+		           surface_desc.Width, surface_desc.Height, static_cast< unsigned >( surface_desc.Format ), surface_desc.ArraySize,
+		           surface_desc.MipLevels, static_cast< unsigned >( surface_desc.BindFlags ),
+		           static_cast< unsigned >( DXGI_FORMAT_NV12 ) );
+		DriverLog( "Flow AMF: input surface is AMF_MEMORY_DX11 %ux%u", width, height );
+	}
+
+	// Fall back to a system-memory surface when there is no DX11 texture to copy into, or when the
+	// format AMF produced is not the one we convert to.
+	if ( impl.surface_texture == nullptr || impl.surface_format != DXGI_FORMAT_NV12 )
+	{
+		if ( impl.surface != nullptr )
+		{
+			impl.surface->Release();
+			impl.surface = nullptr;
+		}
+		impl.surface_texture = nullptr;
+		impl.surface_format = DXGI_FORMAT_UNKNOWN;
+		DriverLog( "Flow AMF: no usable DX11 surface; using system memory instead" );
+
+		if ( impl.staging_texture == nullptr )
+		{
+			SetError( "no staging texture available for the host-memory input surface" );
+			Shutdown();
+			return false;
+		}
 		result = impl.context->AllocSurface( AMF_MEMORY_HOST, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
 		                                     static_cast< amf_int32 >( height ), &impl.surface );
 		if ( result == AMF_OK && impl.surface != nullptr && impl.surface->GetPlanesCount() >= 2 )
@@ -759,55 +799,14 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 			impl.host_surface = impl.host_y_plane != nullptr && impl.host_uv_plane != nullptr &&
 			                    impl.host_y_plane->GetNative() != nullptr && impl.host_uv_plane->GetNative() != nullptr;
 		}
-	}
-
-	if ( impl.host_surface )
-	{
-		DriverLog( "Flow AMF: input surface is AMF_MEMORY_HOST %ux%u (the frame reaches the encoder through system memory)",
-		           width, height );
-	}
-	else
-	{
-		if ( impl.surface != nullptr )
+		if ( !impl.host_surface )
 		{
-			impl.surface->Release();
-			impl.surface = nullptr;
-		}
-		impl.host_y_plane = nullptr;
-		impl.host_uv_plane = nullptr;
-		DriverLog( "Flow AMF: host-memory input surface unavailable; using a DX11 surface" );
-		result = impl.context->AllocSurface( AMF_MEMORY_DX11, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
-		                                     static_cast< amf_int32 >( height ), &impl.surface );
-		if ( result != AMF_OK )
-		{
-			SetStatusError( "AMF AllocSurface(NV12, DX11)", result );
+			SetError( "AMF AllocSurface(NV12) failed for both DX11 and system memory" );
 			Shutdown();
 			return false;
 		}
-
-		// The texture behind that surface, and its DXGI format: the copy is only possible when the
-		// layouts match, and the format is what tells us whether they do.
-		if ( impl.surface->GetPlanesCount() > 0 )
-		{
-			AMFPlane *plane = impl.surface->GetPlaneAt( 0 );
-			if ( plane != nullptr )
-			{
-				impl.surface_texture = static_cast< ID3D11Texture2D * >( plane->GetNative() );
-			}
-		}
-		if ( impl.surface_texture != nullptr )
-		{
-			D3D11_TEXTURE2D_DESC surface_desc{};
-			impl.surface_texture->GetDesc( &surface_desc );
-			impl.surface_format = surface_desc.Format;
-			DriverLog( "Flow AMF: encoder surface %ux%u dxgi_format=%u array=%u mips=%u (converted NV12 is %u)", surface_desc.Width,
-			           surface_desc.Height, static_cast< unsigned >( surface_desc.Format ), surface_desc.ArraySize,
-			           surface_desc.MipLevels, static_cast< unsigned >( DXGI_FORMAT_NV12 ) );
-		}
-		else
-		{
-			DriverLog( "Flow AMF: encoder surface exposes no native DX11 texture; cannot copy into it" );
-		}
+		DriverLog( "Flow AMF: input surface is AMF_MEMORY_HOST %ux%u (the frame is read back through a staging texture)",
+		           width, height );
 	}
 
 	impl.last_error.clear();
@@ -865,31 +864,30 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 			           static_cast< unsigned >( impl.surface_format ) );
 		}
 
-		// Wait for the conversion to actually finish on the GPU before handing the surface to AMF.
-		// Flush() alone is not enough: it queues the commands but returns immediately, and the encoder
-		// reads the surface from its own engine, so it would otherwise encode the untouched surface -
-		// which is exactly what "the stream is black although the conversion wrote a proper image"
-		// looks like. Bounded, so a stuck GPU cannot hang the encode thread.
+		// Make the copy visible on the GPU: submit it, then wait for the GPU to report it finished. The
+		// wait is bounded to a couple of milliseconds because the encode thread holds the device mutex
+		// while it runs and the render thread shares this context - a long wait here starves the
+		// compositor. The first result is logged: "the wait never completed" and "the wait completed"
+		// look identical from the outside but point at different bugs.
+		impl.device_context->Flush();
 		if ( impl.conversion_done != nullptr )
 		{
 			impl.device_context->End( impl.conversion_done );
 			impl.device_context->Flush();
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 50 );
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 2 );
 			HRESULT ready = S_FALSE;
 			while ( ( ready = impl.device_context->GetData( impl.conversion_done, nullptr, 0, 0 ) ) == S_FALSE &&
 			        std::chrono::steady_clock::now() < deadline )
 			{
 				Sleep( 0 );
 			}
-			if ( ready == S_FALSE && !impl.conversion_wait_reported )
+			if ( !impl.conversion_wait_reported )
 			{
 				impl.conversion_wait_reported = true;
-				DriverLog( "Flow AMF: the NV12 conversion and copy did not finish within 50 ms; the encoder may read a stale surface" );
+				DriverLog( "Flow AMF: conversion completion query 0x%08x (%s)", static_cast< unsigned >( ready ),
+				           ready == S_OK ? "completed"
+				                         : ( ready == S_FALSE ? "not reported within 2 ms" : "failed; the encoder may read a stale surface" ) );
 			}
-		}
-		else
-		{
-			impl.device_context->Flush();
 		}
 
 		// The copy has now been submitted and has completed, so the readback cannot deadlock.
@@ -897,6 +895,9 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 		// frame into the planes the host surface exposes.
 		if ( use_host_upload )
 		{
+			// The copy has been submitted by the Flush above, so this blocking Map can return; without
+			// that Flush it would wait for work only this thread could submit (a deadlock).
+			impl.device_context->Flush();
 			D3D11_MAPPED_SUBRESOURCE mapped{};
 			if ( FAILED( impl.device_context->Map( impl.staging_texture, 0, D3D11_MAP_READ, 0, &mapped ) ) )
 			{

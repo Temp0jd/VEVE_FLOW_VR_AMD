@@ -109,6 +109,13 @@ def ffmpeg_command(width, height, fps, args):
             "-zerolatency", "1",
             "-forced-idr", "1",
         ]
+    elif args.encoder == "amf":
+        encoder_args = [
+            "-c:v", "h264_amf",
+            "-usage", "ultralowlatency",
+            "-profile:v", "baseline",
+            "-b:v", args.bitrate,
+        ]
 
     return [
         "ffmpeg",
@@ -367,7 +374,7 @@ def main():
     parser.add_argument("--flow-port", type=int, default=8001)
     parser.add_argument("--source-host", default="127.0.0.1")
     parser.add_argument("--source-port", type=int, default=9101)
-    parser.add_argument("--encoder", choices=["x264", "nvenc"], default="nvenc")
+    parser.add_argument("--encoder", choices=["x264", "nvenc", "amf"], default="nvenc")
     parser.add_argument("--bitrate", default="45M")
     parser.add_argument("--frames", type=int, default=0, help="Number of encoded frames to send; 0 streams until interrupted.")
     args = parser.parse_args()

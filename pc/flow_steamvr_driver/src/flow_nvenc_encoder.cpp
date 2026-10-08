@@ -256,7 +256,7 @@ void FlowNvencEncoder::UnregisterInput()
 }
 
 bool FlowNvencEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, std::vector< uint8_t > &out_packet,
-                                      std::mutex *device_mutex )
+                                      uint64_t *out_pts_us, std::mutex *device_mutex )
 {
 	out_packet.clear();
 	if ( encoder_ == nullptr || bitstream_buffer_ == nullptr || texture == nullptr )
@@ -355,6 +355,11 @@ bool FlowNvencEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us,
 	out_packet.assign( bytes, bytes + lock.bitstreamSizeInBytes );
 	api_->f.nvEncUnlockBitstream( encoder_, bitstream_buffer_ );
 	sent_headers_ = true;
+	// NVENC is synchronous: this packet is the frame that was just submitted.
+	if ( out_pts_us != nullptr )
+	{
+		*out_pts_us = pts_us;
+	}
 	return true;
 }
 

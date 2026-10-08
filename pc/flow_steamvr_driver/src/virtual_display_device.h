@@ -2,16 +2,19 @@
 #pragma once
 
 #include "openvr_driver.h"
+#include "flow_video_encoder.h"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -26,8 +29,6 @@ struct ID3D11Texture2D;
 struct ID3D11VertexShader;
 struct IDXGIFactory1;
 #endif
-
-class FlowNvencEncoder;
 
 class FlowVirtualDisplayDevice : public vr::ITrackedDeviceServerDriver, public vr::IVRVirtualDisplay
 {
@@ -102,13 +103,24 @@ private:
 	uint32_t stream_texture_format_ = 0;
 	std::unordered_map< uint64_t, ID3D11Texture2D * > shared_textures_;
 	std::vector< uint8_t > stream_buffer_;
-	std::unique_ptr< FlowNvencEncoder > nvenc_encoder_;
+	std::unique_ptr< IFlowVideoEncoder > video_encoder_;
 	// Side-by-side stereo stream size; read from flowvr_display settings.
 	uint32_t stream_width_ = 1920;
 	uint32_t stream_height_ = 960;
-	// Encoder quality; read from flowvr_display settings.
+	// Encoder backend (auto/NVENC/AMF) and quality preset; read from flowvr_display settings.
+	FlowVideoEncoderBackend encoder_backend_ = FlowVideoEncoderBackend::Auto;
 	uint32_t stream_bitrate_ = 100000000;
-	uint32_t nvenc_preset_ = 4;
+	uint32_t encoder_preset_ = 4;
+	// Frames handed to the encoder that have not come back as a packet yet, with the pose sequence
+	// they were rendered with and the slot holding them. AMD's encoder returns a frame's bitstream
+	// one call later, so the packet's own timestamp picks the pose instead of the current one.
+	struct PendingFrame
+	{
+		uint64_t pts_us = 0;
+		uint32_t pose_sequence = 0;
+		int slot = -1;
+	};
+	std::deque< PendingFrame > submitted_frames_;
 	FlowSocketHandle stream_socket_ = ~static_cast< FlowSocketHandle >( 0 );
 	FlowSocketHandle stream_listen_socket_ = ~static_cast< FlowSocketHandle >( 0 );
 	FlowSocketHandle stream_discovery_socket_ = ~static_cast< FlowSocketHandle >( 0 );
@@ -117,7 +129,7 @@ private:
 	bool stream_wsa_started_ = false;
 	bool stream_header_sent_ = false;
 	bool owns_stream_ = false;
-	bool nvenc_failed_ = false;
+	bool encoder_failed_ = false;
 	bool logged_texture_desc_ = false;
 	bool dumped_texture_preview_ = false;
 	// Preview copy queued on the GPU, read back on a later Present once it has finished.

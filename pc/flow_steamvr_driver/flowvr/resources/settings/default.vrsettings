@@ -21,6 +21,8 @@
 	    "stream_width": 3200,
 	    "stream_height": 1600,
 	    "stream_bitrate_mbps": 100,
+	    "video_encoder": "auto",
+	    "video_encoder_preset": 4,
 	    "nvenc_preset": 4,
 	    "tan_left": -1.0639,
 	    "tan_right": 1.0639,

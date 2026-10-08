@@ -13,13 +13,17 @@ add_executable(flow_dashboard_helper
   main.cpp
   desktop_layer_streamer.h
   desktop_layer_streamer.cpp
-  "${DRIVER_SRC}/flow_nvenc_encoder.cpp"  # shared with the driver
+  # Shared with the driver: the GPU encoder backends (NVENC on Nvidia, AMF on Radeon).
+  "${DRIVER_SRC}/flow_video_encoder.cpp"
+  "${DRIVER_SRC}/flow_nvenc_encoder.cpp"
+  "${DRIVER_SRC}/flow_amf_encoder.cpp"
 )
 target_include_directories(flow_dashboard_helper PRIVATE
   "${OPENVR_ROOT}/headers"
   "${CMAKE_CURRENT_SOURCE_DIR}/compat"
   "${DRIVER_SRC}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nv-codec-headers/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/amf/include"
 )
 target_link_libraries(flow_dashboard_helper PRIVATE "${OPENVR_ROOT}/lib/win64/openvr_api.lib" ws2_32 d3d11 dxgi)
 

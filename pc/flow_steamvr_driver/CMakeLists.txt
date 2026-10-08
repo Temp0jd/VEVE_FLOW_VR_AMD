@@ -51,8 +51,12 @@ add_library(${DRIVER_NAME} SHARED
   src/hand_controller.h
   src/hand_controller.cpp
   src/flow_shared_input.h
+  src/flow_video_encoder.h
+  src/flow_video_encoder.cpp
   src/flow_nvenc_encoder.h
   src/flow_nvenc_encoder.cpp
+  src/flow_amf_encoder.h
+  src/flow_amf_encoder.cpp
   src/virtual_display_device.h
   src/virtual_display_device.cpp
   src/flow_pose_sync.h
@@ -64,6 +68,7 @@ add_library(${DRIVER_NAME} SHARED
 target_include_directories(${DRIVER_NAME} PRIVATE
   "${OPENVR_INCLUDE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nv-codec-headers/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/amf/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/utils/driverlog"
   "${CMAKE_CURRENT_SOURCE_DIR}/utils/vrmath"
 )

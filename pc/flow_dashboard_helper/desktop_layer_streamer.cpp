@@ -10,7 +10,7 @@
 #include <openvr.h>
 
 #include "driverlog.h"
-#include "flow_nvenc_encoder.h"
+#include "flow_video_encoder.h"
 
 #include <algorithm>
 #include <chrono>
@@ -236,7 +236,8 @@ namespace
 		};
 
 		// Copies the part of the Desktop+ overlay's texture the panel shows and encodes it.
-		Result Capture( vr::VROverlayHandle_t handle, std::vector< uint8_t > &packet, uint32_t fps, uint32_t bitrate )
+		Result Capture( vr::VROverlayHandle_t handle, std::vector< uint8_t > &packet, uint64_t *out_pts_us, uint32_t fps, uint32_t bitrate,
+		                FlowVideoEncoderBackend backend )
 		{
 			const int64_t now = NowMs();
 			if ( source_ == nullptr || handle != source_handle_ || now >= next_refresh_ms_ )
@@ -266,7 +267,7 @@ namespace
 			if ( !encoder_ || width != width_ || height != height_ )
 			{
 				const bool had_encoder = encoder_ != nullptr;
-				if ( !CreateEncoder( width, height, fps, bitrate ) )
+				if ( !CreateEncoder( width, height, fps, bitrate, backend ) )
 				{
 					return Result::None;
 				}
@@ -279,11 +280,19 @@ namespace
 			D3D11_BOX box{ x0, y0, 0, x1, y1, 1 };
 			context_->CopySubresourceRegion( frame_, 0, 0, 0, 0, source_, 0, &box );
 			packet.clear();
-			if ( !encoder_->EncodeTexture( frame_, static_cast< uint64_t >( SteadyUs() ), packet ) )
+			uint64_t encode_pts_us = static_cast< uint64_t >( SteadyUs() );
+			if ( !encoder_->EncodeTexture( frame_, encode_pts_us, packet, &encode_pts_us ) )
 			{
 				DriverLog( "desktop layer: encode failed: %s", encoder_->LastError().c_str() );
 				encoder_.reset();
 				return Result::None;
+			}
+			// AMD's encoder has a frame of delay, so the packet may belong to an earlier frame; the
+			// timestamp it reports is the one the Flow must see. An empty packet just means the
+			// encoder has not produced this frame's bitstream yet.
+			if ( out_pts_us != nullptr )
+			{
+				*out_pts_us = encode_pts_us;
 			}
 			return packet.empty() ? Result::None : Result::Frame;
 		}
@@ -333,7 +342,7 @@ namespace
 			source_handle_ = vr::k_ulOverlayHandleInvalid;
 		}
 
-		bool CreateEncoder( uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate )
+		bool CreateEncoder( uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, FlowVideoEncoderBackend backend )
 		{
 			encoder_.reset();
 			SafeRelease( frame_ );
@@ -348,16 +357,17 @@ namespace
 			{
 				return false;
 			}
-			encoder_ = std::make_unique< FlowNvencEncoder >();
-			if ( !encoder_->Initialize( device_, width, height, fps, bitrate, 4 ) )
+			std::string error;
+			// Preset 4 = NVENC P4 / AMF balanced, the desktop picture is a still image most of the time.
+			encoder_ = FlowCreateInitializedVideoEncoder( backend, device_, width, height, fps, bitrate, 4, &error );
+			if ( encoder_ == nullptr )
 			{
-				DriverLog( "desktop layer: NVENC init failed: %s", encoder_->LastError().c_str() );
-				encoder_.reset();
+				DriverLog( "desktop layer: no usable GPU encoder: %s", error.c_str() );
 				return false;
 			}
 			width_ = width;
 			height_ = height;
-			DriverLog( "desktop layer: encoding Desktop+ panel picture %ux%u", width, height );
+			DriverLog( "desktop layer: encoding Desktop+ panel picture %ux%u with %s", width, height, encoder_->BackendName() );
 			return true;
 		}
 
@@ -371,13 +381,14 @@ namespace
 		UINT source_height_ = 0;
 		int64_t next_refresh_ms_ = 0;
 		ID3D11Texture2D *frame_ = nullptr;
-		std::unique_ptr< FlowNvencEncoder > encoder_;
+		std::unique_ptr< IFlowVideoEncoder > encoder_;
 		uint32_t width_ = 0;
 		uint32_t height_ = 0;
 	};
 } // namespace
 
-DesktopLayerStreamer::DesktopLayerStreamer( uint32_t bitrate, uint32_t fps ) : bitrate_( bitrate ), fps_( fps )
+DesktopLayerStreamer::DesktopLayerStreamer( FlowVideoEncoderBackend backend, uint32_t bitrate, uint32_t fps )
+	: bitrate_( bitrate ), fps_( fps ), backend_( backend )
 {
 	thread_ = std::thread( &DesktopLayerStreamer::Run, this );
 }
@@ -422,6 +433,7 @@ void DesktopLayerStreamer::Run()
 	SOCKET client = INVALID_SOCKET;
 	bool header_sent = false;
 	std::vector< uint8_t > packet;
+	uint64_t packet_pts_us = 0;
 	const int64_t frame_interval_us = 1000000 / std::max< uint32_t >( fps_, 1 );
 	int64_t next_frame_us = 0;
 	const auto close_client = [ & ]( const char *why ) {
@@ -476,7 +488,7 @@ void DesktopLayerStreamer::Run()
 		}
 		next_frame_us = std::max( next_frame_us + frame_interval_us, now_us );
 
-		switch ( source.Capture( panel, packet, fps_, bitrate_ ) )
+		switch ( source.Capture( panel, packet, &packet_pts_us, fps_, bitrate_, backend_ ) )
 		{
 		case PanelSource::Result::SizeChanged:
 			if ( header_sent )
@@ -503,7 +515,7 @@ void DesktopLayerStreamer::Run()
 			header_sent = true;
 			streaming_ = true;
 		}
-		if ( !SendFrame( client, packet, SteadyUs() ) )
+		if ( !SendFrame( client, packet, packet_pts_us ) )
 		{
 			close_client( "send failed" );
 		}

@@ -1,5 +1,6 @@
 param(
-    [ValidateSet("x264", "nvenc")]
+    # x264 always works; nvenc needs an Nvidia GPU, amf an AMD one.
+    [ValidateSet("x264", "nvenc", "amf")]
     [string]$Encoder = "nvenc",
 
     [int]$Frames = 0,
@@ -74,7 +75,7 @@ if ($DirectDesktop) {
     $desktopArgs = @(
         $DesktopSender,
         "--source", "ddagrab",
-        "--encoder", "nvenc",
+        "--encoder", $Encoder,
         "--width", "1920",
         "--height", "1080",
         "--fps", "75",
@@ -88,7 +89,7 @@ if ($DirectDesktop) {
     Remove-Item -LiteralPath $BridgeStdout,$BridgeStderr -ErrorAction SilentlyContinue
     $bridgeProcess = Start-Process -FilePath "python" -ArgumentList $bridgeArgs -WorkingDirectory $ProbeRoot -RedirectStandardOutput $BridgeStdout -RedirectStandardError $BridgeStderr -PassThru
 } else {
-    Write-Host "Using direct driver NVENC H264 stream on TCP :8001. No Python/FFmpeg bridge."
+    Write-Host "Using direct driver H264 stream on TCP :8001 (NVENC on Nvidia, AMF on Radeon). No Python/FFmpeg bridge."
 }
 
 try {

@@ -2,9 +2,9 @@
 #include "virtual_display_device.h"
 
 #include "driverlog.h"
-#include "flow_nvenc_encoder.h"
 #include "flow_pose_sync.h"
 #include "flow_shared_input.h"
+#include "flow_video_encoder.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -246,12 +246,28 @@ FlowVirtualDisplayDevice::FlowVirtualDisplayDevice()
 	{
 		stream_bitrate_ = static_cast< uint32_t >( bitrate_mbps ) * 1000000u;
 	}
-	const int32_t preset = vr::VRSettings()->GetInt32( "flowvr_display", "nvenc_preset" );
-	if ( preset >= 1 && preset <= 7 )
+	// "video_encoder" = auto | nvenc | amf; "video_encoder_preset" 1..7 (the older nvenc_preset
+	// key still works). Auto picks by the GPU vendor once the D3D11 device exists.
+	vr::EVRSettingsError settings_error = vr::VRSettingsError_None;
+	char backend_value[ 64 ] = {};
+	vr::VRSettings()->GetString( "flowvr_display", "video_encoder", backend_value, sizeof( backend_value ), &settings_error );
+	if ( settings_error == vr::VRSettingsError_None )
 	{
-		nvenc_preset_ = static_cast< uint32_t >( preset );
+		encoder_backend_ = FlowVideoEncoderBackendFromString( backend_value );
 	}
-	DriverLog( "Flow virtual display encoder %u Mbit/s, NVENC preset P%u", stream_bitrate_ / 1000000u, nvenc_preset_ );
+	settings_error = vr::VRSettingsError_None;
+	int32_t preset = vr::VRSettings()->GetInt32( "flowvr_display", "video_encoder_preset", &settings_error );
+	if ( settings_error != vr::VRSettingsError_None )
+	{
+		settings_error = vr::VRSettingsError_None;
+		preset = vr::VRSettings()->GetInt32( "flowvr_display", "nvenc_preset", &settings_error );
+	}
+	if ( settings_error == vr::VRSettingsError_None && preset >= 1 && preset <= 7 )
+	{
+		encoder_preset_ = static_cast< uint32_t >( preset );
+	}
+	DriverLog( "Flow virtual display encoder %u Mbit/s, backend %s, preset %u", stream_bitrate_ / 1000000u,
+	           FlowVideoEncoderBackendName( encoder_backend_ ), encoder_preset_ );
 #endif
 	DriverLog( "Flow virtual display serial number: %s", serial_number_.c_str() );
 	DriverLog( "Flow virtual display graphics adapter LUID: 0x%llx",
@@ -272,7 +288,7 @@ vr::EVRInitError FlowVirtualDisplayDevice::Activate( uint32_t unObjectId )
 	present_count_ = 0;
 	vsync_counter_ = 0;
 #ifdef _WIN32
-	nvenc_failed_ = false;
+	encoder_failed_ = false;
 #endif
 
 	vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer( device_index_ );
@@ -402,7 +418,7 @@ bool FlowVirtualDisplayDevice::InitializeD3DResources()
 		return false;
 	}
 
-	// The encode thread drives NVENC on this device while Present renders on it. Without
+	// The encode thread drives the GPU encoder on this device while Present renders on it. Without
 	// multithread protection the two raced inside the immediate context and hung Present
 	// while it held the compositor's keyed mutex (SteamVR froze).
 	ID3D11Multithread *multithread = nullptr;
@@ -997,7 +1013,7 @@ bool FlowVirtualDisplayDevice::EnsureStreamDownsampleResources( uint32_t source_
 		{
 			return true;
 		}
-		// The encode thread holds NVENC registrations for these textures; recreating them
+		// The encode thread holds encoder registrations for these textures; recreating them
 		// under it is not supported. The compositor backbuffer format does not change in practice.
 		TraceVirtualDisplayCall( "Compositor backbuffer format changed; streaming stopped" );
 		return false;
@@ -1155,7 +1171,7 @@ void FlowVirtualDisplayDevice::StreamTexturePreview( ID3D11Texture2D *texture, c
 {
 #ifdef _WIN32
 	// Runs on the compositor's Present thread with the backbuffer's keyed mutex held, so it
-	// only downsamples into a free slot and hands it off. NVENC and the socket live on the
+	// only downsamples into a free slot and hands it off. The encoder and the socket live on the
 	// encode thread; doing them here (~12-15 ms) made SteamVR fall from 75 Hz to ~37 Hz.
 	if ( texture == nullptr )
 	{
@@ -1273,8 +1289,8 @@ void FlowVirtualDisplayDevice::StopEncodeThread()
 #endif
 }
 
-// Owns the client socket and NVENC: accepts the Flow (broadcasting discovery meanwhile),
-// then encodes and sends whichever slot Present handed over most recently.
+// Owns the client socket and the GPU encoder: accepts the Flow (broadcasting discovery
+// meanwhile), then encodes and sends whichever slot Present handed over most recently.
 void FlowVirtualDisplayDevice::EncodeThreadMain()
 {
 #ifdef _WIN32
@@ -1285,9 +1301,9 @@ void FlowVirtualDisplayDevice::EncodeThreadMain()
 		{
 			if ( EnsureStreamSocketConnected() )
 			{
-				if ( nvenc_encoder_ != nullptr )
+				if ( video_encoder_ != nullptr )
 				{
-					nvenc_encoder_->RequestKeyframe(); // new client can start decoding at once
+					video_encoder_->RequestKeyframe(); // new client can start decoding at once
 				}
 				SetStreamClientConnected( true );
 			}
@@ -1329,41 +1345,68 @@ void FlowVirtualDisplayDevice::EncodeThreadMain()
 void FlowVirtualDisplayDevice::EncodeAndSendSlot( int slot, uint64_t pts_us, uint32_t pose_sequence )
 {
 #ifdef _WIN32
-	if ( nvenc_failed_ || stream_socket_ == kInvalidFlowSocket )
+	if ( encoder_failed_ || stream_socket_ == kInvalidFlowSocket )
 	{
 		return;
 	}
 	const auto start = std::chrono::steady_clock::now();
-	if ( nvenc_encoder_ == nullptr )
+	if ( video_encoder_ == nullptr )
 	{
 		std::lock_guard< std::mutex > lock( d3d_mutex_ );
-		nvenc_encoder_ = std::make_unique< FlowNvencEncoder >();
-		if ( !nvenc_encoder_->Initialize( d3d_device_, stream_width_, stream_height_, kStreamPreviewFps, stream_bitrate_, nvenc_preset_ ) )
+		std::string error;
+		video_encoder_ = FlowCreateInitializedVideoEncoder( encoder_backend_, d3d_device_, stream_width_, stream_height_, kStreamPreviewFps,
+		                                                    stream_bitrate_, encoder_preset_, &error );
+		if ( video_encoder_ == nullptr )
 		{
-			nvenc_failed_ = true;
-			TraceVirtualDisplayCall( "FLOWH264 direct NVENC initialize failed" );
+			encoder_failed_ = true;
+			char trace_line[ 320 ];
+			std::snprintf( trace_line, sizeof( trace_line ), "FLOWH264 encoder initialize failed: %s", error.c_str() );
+			TraceVirtualDisplayCall( trace_line );
+			DriverLog( "Flow virtual display: no usable GPU H.264 encoder (%s)", error.c_str() );
 			CloseStreamSocket();
 			return;
 		}
+		DriverLog( "Flow virtual display: %s encoder on %s", video_encoder_->BackendName(), FlowGpuDescription( d3d_device_ ).c_str() );
 	}
 
 	CheckStreamDumpRequest();
 	std::vector< uint8_t > packet;
-	if ( !nvenc_encoder_->EncodeTexture( stream_slot_textures_[ slot ], pts_us, packet, &d3d_mutex_ ) )
+	uint64_t packet_pts_us = pts_us;
+	if ( !video_encoder_->EncodeTexture( stream_slot_textures_[ slot ], pts_us, packet, &packet_pts_us, &d3d_mutex_ ) )
 	{
-		TraceVirtualDisplayCall( "FLOWH264 direct NVENC encode failed" );
-		nvenc_failed_ = true;
+		TraceVirtualDisplayCall( "FLOWH264 encode failed" );
+		encoder_failed_ = true;
 		CloseStreamSocket();
 		return;
+	}
+	// Remember which pose this frame was rendered with, so a packet that comes back a call later
+	// (AMD's encoder has one frame of delay) is still stamped with the frame's own pose.
+	submitted_frames_.push_back( PendingFrame{ pts_us, pose_sequence, slot } );
+	while ( submitted_frames_.size() > 8 )
+	{
+		submitted_frames_.pop_front();
 	}
 	if ( packet.empty() )
 	{
 		return;
 	}
+	uint32_t packet_pose_sequence = pose_sequence;
+	int packet_slot = slot;
+	while ( !submitted_frames_.empty() )
+	{
+		const PendingFrame front = submitted_frames_.front();
+		submitted_frames_.pop_front();
+		if ( front.pts_us >= packet_pts_us )
+		{
+			packet_pose_sequence = front.pose_sequence;
+			packet_slot = front.slot;
+			break;
+		}
+	}
 	const auto encode_done = std::chrono::steady_clock::now();
-	RecordStreamDumpPacket( slot, packet );
+	RecordStreamDumpPacket( packet_slot, packet );
 
-	if ( !SendH264Packet( packet, pts_us, EpochMilliseconds(), pose_sequence ) )
+	if ( !SendH264Packet( packet, packet_pts_us, EpochMilliseconds(), packet_pose_sequence ) )
 	{
 		CloseStreamSocket();
 		return;
@@ -1407,7 +1450,10 @@ void FlowVirtualDisplayDevice::CheckStreamDumpRequest()
 		TraceVirtualDisplayCall( "stream dump: cannot open flow_stream_dump.h264" );
 		return;
 	}
-	nvenc_encoder_->RequestKeyframe(); // the dump must start decodable
+	if ( video_encoder_ != nullptr )
+	{
+		video_encoder_->RequestKeyframe(); // the dump must start decodable
+	}
 	stream_dump_frames_left_ = kStreamDumpFrames;
 	TraceVirtualDisplayCall( "stream dump: recording" );
 #endif
@@ -1623,7 +1669,7 @@ void FlowVirtualDisplayDevice::FinishTexturePreviewDump()
 void FlowVirtualDisplayDevice::ReleaseD3DResources()
 {
 #ifdef _WIN32
-	StopEncodeThread(); // before d3d_mutex_: the thread takes it to submit NVENC work
+	StopEncodeThread(); // before d3d_mutex_: the thread takes it to submit encoder work
 	std::lock_guard< std::mutex > lock( d3d_mutex_ );
 	if ( owns_stream_ )
 	{
@@ -1631,8 +1677,9 @@ void FlowVirtualDisplayDevice::ReleaseD3DResources()
 		g_stream_owner.compare_exchange_strong( expected_owner, nullptr );
 		owns_stream_ = false;
 	}
-	nvenc_encoder_.reset();
-	nvenc_failed_ = false;
+	video_encoder_.reset();
+	submitted_frames_.clear();
+	encoder_failed_ = false;
 	if ( flush_texture_ != nullptr )
 	{
 		flush_texture_->Release();

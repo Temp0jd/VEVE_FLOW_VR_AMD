@@ -600,7 +600,15 @@ int main( int argc, char **argv )
 			mbps = error == vr::VRSettingsError_None ? ( std::max )( mbps, 5 ) : 30;
 			int32_t fps = vr::VRSettings()->GetInt32( "driver_flowvr", "desktop_fps", &error );
 			fps = error == vr::VRSettingsError_None ? std::clamp( fps, 10, 75 ) : 60;
-			desktop_layer = std::make_unique< DesktopLayerStreamer >( static_cast< uint32_t >( mbps ) * 1000000u, static_cast< uint32_t >( fps ) );
+			// Same encoder choice as the driver (flowvr_display.video_encoder), so both streams
+			// use the GPU that is actually present.
+			error = vr::VRSettingsError_None;
+			char backend_value[ 64 ] = {};
+			vr::VRSettings()->GetString( "flowvr_display", "video_encoder", backend_value, sizeof( backend_value ), &error );
+			const FlowVideoEncoderBackend backend =
+			    error == vr::VRSettingsError_None ? FlowVideoEncoderBackendFromString( backend_value ) : FlowVideoEncoderBackend::Auto;
+			desktop_layer = std::make_unique< DesktopLayerStreamer >( backend, static_cast< uint32_t >( mbps ) * 1000000u,
+			                                                          static_cast< uint32_t >( fps ) );
 		}
 	}
 	const vr::VROverlayHandle_t reticle = CreateReticle();

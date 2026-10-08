@@ -1,5 +1,7 @@
 #pragma once
 
+#include "flow_video_encoder.h"
+
 #include <atomic>
 #include <cstdint>
 #include <thread>
@@ -16,7 +18,7 @@
 class DesktopLayerStreamer
 {
 public:
-	DesktopLayerStreamer( uint32_t bitrate, uint32_t fps );
+	DesktopLayerStreamer( FlowVideoEncoderBackend backend, uint32_t bitrate, uint32_t fps );
 	~DesktopLayerStreamer();
 
 	// Set every loop by the helper: the Desktop+ overlay the dashboard shows now (each Desktop+
@@ -30,6 +32,7 @@ private:
 
 	uint32_t bitrate_;
 	uint32_t fps_;
+	FlowVideoEncoderBackend backend_ = FlowVideoEncoderBackend::Auto;
 	std::atomic< bool > stop_{ false };
 	std::atomic< uint64_t > panel_{ 0 };
 	std::atomic< bool > streaming_{ false };

@@ -264,27 +264,16 @@ struct FlowAmfEncoder::Impl
 	ID3D11Texture2D *surface_texture = nullptr;
 	DXGI_FORMAT surface_format = DXGI_FORMAT_UNKNOWN;
 	bool surface_copy_logged = false;
-	// Input surface in system memory, which is the path FFmpeg's AMF encoder uses and the only one
-	// that works on the tested hardware: a DX11 surface - even one AMF allocated itself and that a
-	// completed 3D copy has written into - is read by the encoder as empty (black frames, valid
-	// parameter sets, no error anywhere). Both directions are pipelined so that neither the GPU wait
-	// nor the readback happens in the frame path: the converted NV12 is copied into a staging texture
-	// for the frame being encoded, and the frame from one call earlier is read back without blocking
-	// (D3D11_MAP_FLAG_DO_NOT_WAIT) and written into the next of several host surfaces, because AMF may
-	// still be reading the surface it was handed.
+	// True when the AMF surface wraps nv12_texture: the encoder then reads what we just converted.
+	bool surface_is_our_texture = false;
+	// Input surface in system memory, which is the path FFmpeg's AMF encoder uses: the converted NV12
+	// is read back from a staging texture into the surface's own planes. On the hardware this was
+	// tested on, a DX11 surface written by a 3D copy is read by the encoder as empty (black frames
+	// with no error anywhere), which is why the host path is preferred.
 	bool host_surface = false;
-	static constexpr uint32_t kHostSurfaceCount = 3;
-	static constexpr uint32_t kStagingCount = 2;
-	AMFSurface *host_surfaces[ kHostSurfaceCount ] = {};
-	AMFPlane *host_y_planes[ kHostSurfaceCount ] = {};
-	AMFPlane *host_uv_planes[ kHostSurfaceCount ] = {};
-	uint32_t host_surface_index = 0;
-	ID3D11Texture2D *staging_textures[ kStagingCount ] = {};
-	uint32_t staging_index = 0;
-	// How many frames have been queued into the staging pair; a readback only makes sense once the
-	// texture it maps has actually been written.
-	uint32_t staging_frames = 0;
-	bool upload_skip_reported = false;
+	AMFPlane *host_y_plane = nullptr;  // borrowed from the surface
+	AMFPlane *host_uv_plane = nullptr; // borrowed from the surface
+	ID3D11Texture2D *staging_texture = nullptr;
 	bool host_copy_logged = false;
 	ID3D11VertexShader *vertex_shader = nullptr;
 	ID3D11PixelShader *luma_shader = nullptr;
@@ -346,14 +335,24 @@ bool FlowAmfEncoder::CreateConversionResources()
 	desc.Format = DXGI_FORMAT_NV12;
 	desc.SampleDesc.Count = 1;
 	desc.Usage = D3D11_USAGE_DEFAULT;
-	desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-	// No D3D11_RESOURCE_MISC_SHARED: AMF's CreateSurfaceFromDX11Native is handed this texture
-	// pointer and wraps it in-process, so no sharing is involved (FFmpeg's D3D11 hwcontext makes
-	// that flag opt-in too).
+	// D3D11_BIND_VIDEO_ENCODER is the flag that marks a texture as usable by a hardware video
+	// encoder. AMF's own DX11 surface reports bind=0xa8 (SHADER_RESOURCE | RENDER_TARGET |
+	// UNORDERED_ACCESS, no VIDEO_ENCODER) and the encoder reads its contents as empty on the tested
+	// hardware, so this backend now creates the texture itself with the flag and lets AMF wrap it
+	// (CreateSurfaceFromDX11Native) instead of allocating the surface on its own.
+	//
+	// No D3D11_RESOURCE_MISC_SHARED: AMF is handed the texture pointer and wraps it in-process, so
+	// no sharing is involved (FFmpeg's D3D11 hwcontext makes that flag opt-in too).
+	desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_VIDEO_ENCODER;
 	if ( FAILED( impl.device->CreateTexture2D( &desc, nullptr, &impl.nv12_texture ) ) )
 	{
-		SetError( "CreateTexture2D(NV12) failed" );
-		return false;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		if ( FAILED( impl.device->CreateTexture2D( &desc, nullptr, &impl.nv12_texture ) ) )
+		{
+			SetError( "CreateTexture2D(NV12) failed" );
+			return false;
+		}
+		DriverLog( "Flow AMF: this driver rejects D3D11_BIND_VIDEO_ENCODER on the NV12 texture" );
 	}
 
 	// Plane render targets need D3D11.3: only D3D11_RENDER_TARGET_VIEW_DESC1 can name plane 1 of
@@ -395,24 +394,19 @@ bool FlowAmfEncoder::CreateConversionResources()
 		return false;
 	}
 
-	// Readback targets for the host-memory input surfaces. Two of them, so the transfer queued for one
-	// frame has had a whole frame on the GPU by the time the previous one is mapped.
-	for ( ID3D11Texture2D *&staging : impl.staging_textures )
+	// A readback target for the host-memory input surface.
+	D3D11_TEXTURE2D_DESC staging_desc{};
+	staging_desc.Width = impl.width;
+	staging_desc.Height = impl.height;
+	staging_desc.MipLevels = 1;
+	staging_desc.ArraySize = 1;
+	staging_desc.Format = DXGI_FORMAT_NV12;
+	staging_desc.SampleDesc.Count = 1;
+	staging_desc.Usage = D3D11_USAGE_STAGING;
+	staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	if ( FAILED( impl.device->CreateTexture2D( &staging_desc, nullptr, &impl.staging_texture ) ) )
 	{
-		D3D11_TEXTURE2D_DESC staging_desc{};
-		staging_desc.Width = impl.width;
-		staging_desc.Height = impl.height;
-		staging_desc.MipLevels = 1;
-		staging_desc.ArraySize = 1;
-		staging_desc.Format = DXGI_FORMAT_NV12;
-		staging_desc.SampleDesc.Count = 1;
-		staging_desc.Usage = D3D11_USAGE_STAGING;
-		staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-		impl.device->CreateTexture2D( &staging_desc, nullptr, &staging );
-		if ( staging == nullptr )
-		{
-			break;
-		}
+		impl.staging_texture = nullptr; // the host path is then unavailable; the DX11 one is used
 	}
 
 	// Completion marker for the conversion, waited on before every submit (see EncodeTexture).
@@ -495,10 +489,7 @@ void FlowAmfEncoder::ReleaseConversionResources()
 	SafeRelease( impl.chroma_target );
 	SafeRelease( impl.luma_target );
 	SafeRelease( impl.conversion_done );
-	for ( ID3D11Texture2D *&staging : impl.staging_textures )
-	{
-		SafeRelease( staging );
-	}
+	SafeRelease( impl.staging_texture );
 	SafeRelease( impl.nv12_texture );
 	if ( impl.device_context != nullptr )
 	{
@@ -764,67 +755,34 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 		return false;
 	}
 
-	// The encoder's input surface. System memory is what works: a DX11 surface - even one AMF allocated
-	// itself and that a completed 3D copy has written into - is read by the encoder as empty on the
-	// tested hardware (the stream is then black while the conversion is provably correct and the
-	// completion query reports success). Several host surfaces are allocated because AMF may still be
-	// reading the one it was handed when the next frame is ready, and their contents are filled by the
-	// non-blocking, one-frame-behind readback in EncodeTexture.
+	// The encoder's input surface: AMF wraps the texture this backend converts into, so the encoder
+	// reads exactly the texture whose contents are verified below (see the luma readback) and the frame
+	// path needs no copy at all. AMF allocating the surface itself is the fallback - on the tested
+	// hardware the encoder then reads it as empty.
 	impl.surface = nullptr;
-	bool host_surfaces_ready = impl.staging_textures[ 0 ] != nullptr && impl.staging_textures[ Impl::kStagingCount - 1 ] != nullptr;
-	for ( uint32_t index = 0; index < Impl::kHostSurfaceCount && host_surfaces_ready; ++index )
+	result = impl.context->CreateSurfaceFromDX11Native( impl.nv12_texture, &impl.surface, nullptr );
+	if ( result == AMF_OK && impl.surface != nullptr && impl.surface->GetPlanesCount() > 0 )
 	{
-		AMFSurface *host = nullptr;
-		if ( impl.context->AllocSurface( AMF_MEMORY_HOST, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
-		                                 static_cast< amf_int32 >( height ), &host ) != AMF_OK ||
-		     host == nullptr || host->GetPlanesCount() < 2 )
-		{
-			if ( host != nullptr )
-			{
-				host->Release();
-			}
-			host_surfaces_ready = false;
-			break;
-		}
-		AMFPlane *y_plane = host->GetPlaneAt( 0 );
-		AMFPlane *uv_plane = host->GetPlaneAt( 1 );
-		if ( y_plane == nullptr || uv_plane == nullptr || y_plane->GetNative() == nullptr || uv_plane->GetNative() == nullptr )
-		{
-			host->Release();
-			host_surfaces_ready = false;
-			break;
-		}
-		impl.host_surfaces[ index ] = host;
-		impl.host_y_planes[ index ] = y_plane;
-		impl.host_uv_planes[ index ] = uv_plane;
-	}
-	impl.host_surface = host_surfaces_ready;
-
-	if ( impl.host_surface )
-	{
-		DriverLog( "Flow AMF: input surfaces are AMF_MEMORY_HOST %ux%u x%u (read back through %u staging textures without blocking)",
-		           width, height, Impl::kHostSurfaceCount, Impl::kStagingCount );
+		impl.surface_texture = impl.nv12_texture;
+		impl.surface_format = DXGI_FORMAT_NV12;
+		impl.surface_is_our_texture = true;
+		DriverLog( "Flow AMF: the encoder wraps our NV12 texture (bind=0x%x), so no per-frame copy is needed",
+		           static_cast< unsigned >( D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_VIDEO_ENCODER ) );
 	}
 	else
 	{
-		// Fall back to a DX11 surface: it costs no readback, but on this kind of driver the encoder
-		// may read it as empty, which is why it is not the first choice.
-		for ( AMFSurface *&host : impl.host_surfaces )
+		if ( impl.surface != nullptr )
 		{
-			if ( host != nullptr )
-			{
-				host->Release();
-				host = nullptr;
-			}
+			impl.surface->Release();
+			impl.surface = nullptr;
 		}
-		impl.host_surface = false;
-		DriverLog( "Flow AMF: host-memory input surfaces unavailable; using a DX11 surface" );
-
+		SetStatusError( "AMF CreateSurfaceFromDX11Native", result );
+		DriverLog( "Flow AMF: AMF could not wrap the NV12 texture; letting it allocate the surface" );
 		result = impl.context->AllocSurface( AMF_MEMORY_DX11, AMF_SURFACE_NV12, static_cast< amf_int32 >( width ),
 		                                     static_cast< amf_int32 >( height ), &impl.surface );
-		if ( result != AMF_OK )
+		if ( result != AMF_OK || impl.surface == nullptr )
 		{
-			SetStatusError( "AMF AllocSurface(NV12)", result );
+			SetStatusError( "AMF AllocSurface(NV12, DX11)", result );
 			Shutdown();
 			return false;
 		}
@@ -864,9 +822,7 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 {
 	out_packet.clear();
 	Impl &impl = *impl_;
-	// With host-memory surfaces impl.surface stays null: the surface that gets submitted is one of the
-	// ring (see Initialize).
-	if ( impl.encoder == nullptr || texture == nullptr || ( !impl.host_surface && impl.surface == nullptr ) )
+	if ( impl.encoder == nullptr || impl.surface == nullptr || texture == nullptr )
 	{
 		return false;
 	}
@@ -883,69 +839,20 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 			return false;
 		}
 
-		// Pipelined hand-off: the transfer for this frame is only queued here, and the frame whose
-		// transfer has had a whole frame of GPU time is read back without blocking into the next host
-		// surface. Nothing in this path waits, which matters because the encode thread holds the device
-		// mutex and the render thread shares this context: blocking here starves the compositor (that
-		// is what made SteamVR report a critical error with the 50 ms wait).
-		AMFSurface *target = impl.surface;
-		bool have_frame = true;
-		if ( impl.host_surface && impl.staging_textures[ 0 ] != nullptr )
+		// Hand the converted frame to the encoder: either into the staging texture that is read back into
+		// the host surface's planes, or into the DX11 surface AMF allocated (see Initialize). Both are
+		// only queued here. The readback itself happens after the wait below: a blocking Map on a copy
+		// that has not been submitted yet is a deadlock, because the encode thread would be waiting for
+		// work that only it could submit.
+		if ( impl.surface_is_our_texture )
 		{
-			impl.device_context->CopyResource( impl.staging_textures[ impl.staging_index ], impl.nv12_texture );
-			impl.device_context->Flush();
-			++impl.staging_frames;
-
-			// Read back the frame queued on the previous call, never this one: by now the GPU has had a
-			// whole frame to finish that transfer, and a Map with DO_NOT_WAIT cannot block either way.
-			const uint32_t ready_index = impl.staging_index ^ 1u;
-			have_frame = impl.staging_frames >= Impl::kStagingCount;
-			if ( have_frame )
+			// The encoder reads the texture that was just filled: there is nothing to copy, only the
+			// completion wait below.
+			if ( !impl.surface_copy_logged )
 			{
-				D3D11_MAPPED_SUBRESOURCE mapped{};
-				const HRESULT mapped_result = impl.device_context->Map( impl.staging_textures[ ready_index ], 0, D3D11_MAP_READ,
-				                                                        D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped );
-				if ( mapped_result == DXGI_ERROR_WAS_STILL_DRAWING )
-				{
-					// The GPU has not finished with it yet: drop this frame rather than wait for it.
-					have_frame = false;
-					if ( !impl.upload_skip_reported )
-					{
-						impl.upload_skip_reported = true;
-						DriverLog( "Flow AMF: the previous frame's readback was not ready yet; dropping this frame" );
-					}
-				}
-				else if ( FAILED( mapped_result ) )
-				{
-					SetError( "mapping the NV12 staging texture failed" );
-					return false;
-				}
-				else
-				{
-					target = impl.host_surfaces[ impl.host_surface_index ];
-					AMFPlane *y_plane = impl.host_y_planes[ impl.host_surface_index ];
-					AMFPlane *uv_plane = impl.host_uv_planes[ impl.host_surface_index ];
-					impl.host_surface_index = ( impl.host_surface_index + 1 ) % Impl::kHostSurfaceCount;
-
-					const auto *source = static_cast< const uint8_t * >( mapped.pData );
-					auto *y_destination = static_cast< uint8_t * >( y_plane->GetNative() );
-					auto *uv_destination = static_cast< uint8_t * >( uv_plane->GetNative() );
-					const size_t y_pitch = static_cast< size_t >( y_plane->GetHPitch() );
-					const size_t uv_pitch = static_cast< size_t >( uv_plane->GetHPitch() );
-					// The step FFmpeg's AMF encoder does as well (amf_copy_surface in amfenc.c).
-					CopyPlaneRows( source, mapped.RowPitch, y_destination, y_pitch, impl.width, impl.height );
-					CopyPlaneRows( source + static_cast< size_t >( impl.height ) * mapped.RowPitch, mapped.RowPitch, uv_destination, uv_pitch,
-					               impl.width, impl.height / 2 );
-					impl.device_context->Unmap( impl.staging_textures[ ready_index ], 0 );
-					if ( !impl.host_copy_logged )
-					{
-						impl.host_copy_logged = true;
-						DriverLog( "Flow AMF: uploading the converted NV12 into a host surface (y_pitch=%zu uv_pitch=%zu staging_pitch=%u)",
-						           y_pitch, uv_pitch, mapped.RowPitch );
-					}
-				}
+				impl.surface_copy_logged = true;
+				DriverLog( "Flow AMF: the encoder reads the converted NV12 texture directly" );
 			}
-			impl.staging_index = ready_index; // alternate the pair
 		}
 		else if ( impl.surface_texture != nullptr && impl.surface_format == DXGI_FORMAT_NV12 )
 		{
@@ -955,47 +862,47 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 				impl.surface_copy_logged = true;
 				DriverLog( "Flow AMF: copying the converted NV12 into the AMF surface every frame" );
 			}
-			impl.device_context->Flush();
-			if ( impl.conversion_done != nullptr )
-			{
-				impl.device_context->End( impl.conversion_done );
-				impl.device_context->Flush();
-				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 2 );
-				HRESULT ready = S_FALSE;
-				while ( ( ready = impl.device_context->GetData( impl.conversion_done, nullptr, 0, 0 ) ) == S_FALSE &&
-				        std::chrono::steady_clock::now() < deadline )
-				{
-					Sleep( 0 );
-				}
-				if ( !impl.conversion_wait_reported )
-				{
-					impl.conversion_wait_reported = true;
-					DriverLog( "Flow AMF: conversion completion query 0x%08x (%s)", static_cast< unsigned >( ready ),
-					           ready == S_OK ? "completed"
-					                         : ( ready == S_FALSE ? "not reported within 2 ms" : "failed; the encoder may read a stale surface" ) );
-				}
-			}
 		}
 		else if ( !impl.surface_copy_logged )
 		{
 			impl.surface_copy_logged = true;
-			DriverLog( "Flow AMF: no usable input surface to copy into" );
+			DriverLog( "Flow AMF: encoder surface is not DXGI_FORMAT_NV12 (%u), so no copy happens and the encoder reads an empty surface",
+			           static_cast< unsigned >( impl.surface_format ) );
 		}
 
-		if ( !have_frame )
+		// Make the copy visible on the GPU: submit it, then wait for the GPU to report it finished. The
+		// wait is bounded to a couple of milliseconds because the encode thread holds the device mutex
+		// while it runs and the render thread shares this context - a long wait here starves the
+		// compositor. The first result is logged: "the wait never completed" and "the wait completed"
+		// look identical from the outside but point at different bugs.
+		impl.device_context->Flush();
+		if ( impl.conversion_done != nullptr )
 		{
-			if ( device_lock.owns_lock() )
+			impl.device_context->End( impl.conversion_done );
+			impl.device_context->Flush();
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 2 );
+			HRESULT ready = S_FALSE;
+			while ( ( ready = impl.device_context->GetData( impl.conversion_done, nullptr, 0, 0 ) ) == S_FALSE &&
+			        std::chrono::steady_clock::now() < deadline )
 			{
-				device_lock.unlock();
+				Sleep( 0 );
 			}
-			return true;
+			if ( !impl.conversion_wait_reported )
+			{
+				impl.conversion_wait_reported = true;
+				DriverLog( "Flow AMF: conversion completion query 0x%08x (%s)", static_cast< unsigned >( ready ),
+				           ready == S_OK ? "completed"
+				                         : ( ready == S_FALSE ? "not reported within 2 ms" : "failed; the encoder may read a stale surface" ) );
+			}
 		}
 
-		target->SetPts( static_cast< amf_pts >( pts_us ) * 10 ); // amf_pts counts 100 ns
-		const amf_int64 forced = impl.force_idr ? AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR : AMF_VIDEO_ENCODER_PICTURE_TYPE_NONE;
-		target->SetProperty( AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE, forced );
 
-		const AMF_RESULT submit = impl.encoder->SubmitInput( target );
+
+		impl.surface->SetPts( static_cast< amf_pts >( pts_us ) * 10 ); // amf_pts counts 100 ns
+		const amf_int64 forced = impl.force_idr ? AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR : AMF_VIDEO_ENCODER_PICTURE_TYPE_NONE;
+		impl.surface->SetProperty( AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE, forced );
+
+		const AMF_RESULT submit = impl.encoder->SubmitInput( impl.surface );
 		if ( submit == AMF_INPUT_FULL )
 		{
 			// The encoder has not consumed the previous frame yet: drop this one instead of
@@ -1127,17 +1034,6 @@ void FlowAmfEncoder::Shutdown()
 		impl.surface->Release();
 		impl.surface = nullptr;
 	}
-	for ( AMFSurface *&host : impl.host_surfaces )
-	{
-		if ( host != nullptr )
-		{
-			host->Release();
-			host = nullptr;
-		}
-	}
-	impl.host_surface_index = 0;
-	impl.staging_index = 0;
-	impl.host_surface = false;
 	ReleaseConversionResources();
 	if ( impl.encoder != nullptr )
 	{

@@ -37,6 +37,9 @@ endif()
 add_subdirectory(utils/driverlog)
 add_subdirectory(utils/vrmath)
 
+# The libraries the shared encoder backends need, also used by the dashboard helper's CMakeLists.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../flow_encoders.cmake")
+
 set(TARGET_NAME flowvr)
 set(DRIVER_NAME "driver_${TARGET_NAME}")
 
@@ -79,10 +82,7 @@ target_link_libraries(${DRIVER_NAME} PRIVATE
   util_vrmath
   ws2_32
   iphlpapi
-  d3d11
-  dxgi
-  d3dcompiler
-  ole32
+  ${FLOW_ENCODER_LIBS}
 )
 
 set_target_properties(${DRIVER_NAME} PROPERTIES

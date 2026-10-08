@@ -18,6 +18,8 @@ add_executable(flow_dashboard_helper
   "${DRIVER_SRC}/flow_nvenc_encoder.cpp"
   "${DRIVER_SRC}/flow_amf_encoder.cpp"
 )
+# The libraries those encoder files need, shared with the driver's CMakeLists.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../flow_encoders.cmake")
 target_include_directories(flow_dashboard_helper PRIVATE
   "${OPENVR_ROOT}/headers"
   "${CMAKE_CURRENT_SOURCE_DIR}/compat"
@@ -25,7 +27,11 @@ target_include_directories(flow_dashboard_helper PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nv-codec-headers/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/amf/include"
 )
-target_link_libraries(flow_dashboard_helper PRIVATE "${OPENVR_ROOT}/lib/win64/openvr_api.lib" ws2_32 d3d11 dxgi)
+target_link_libraries(flow_dashboard_helper PRIVATE
+  "${OPENVR_ROOT}/lib/win64/openvr_api.lib"
+  ws2_32
+  ${FLOW_ENCODER_LIBS}
+)
 
 # No console window: SteamVR launches it in the background. main() stays the entry point.
 set_target_properties(flow_dashboard_helper PROPERTIES

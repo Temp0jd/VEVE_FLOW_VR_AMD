@@ -91,10 +91,14 @@ function Set-IniValues([string[]]$lines, [string]$section, $values) {
 
 function Find-DesktopPlus {
     $libraries = @()
-    $vdf = Join-Path ${env:ProgramFiles(x86)} "Steam\steamapps\libraryfolders.vdf"
+    # ${env:ProgramFiles(x86)} is unset on a 32-bit-only install; fall back to Program Files.
+    $pfx = ${env:ProgramFiles(x86)}
+    if (-not $pfx) { $pfx = $env:ProgramFiles }
+    $vdf = $null
+    if ($pfx) { $vdf = Join-Path $pfx "Steam\steamapps\libraryfolders.vdf" }
     $steam = (Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction SilentlyContinue).SteamPath
     if ($steam) { $vdf = Join-Path $steam "steamapps\libraryfolders.vdf" }
-    if (Test-Path $vdf) {
+    if ($vdf -and (Test-Path $vdf)) {
         $libraries = Select-String -Path $vdf -Pattern '"path"\s+"([^"]+)"' |
             ForEach-Object { $_.Matches[0].Groups[1].Value -replace '\\\\', '\' }
     }

@@ -116,6 +116,31 @@ namespace
 		}
 	}
 
+	// Lowest H.264 level that can carry this stream. The limits are macroblocks per second and per
+	// frame, and the obvious 5.1 is not enough for 3200x1600 at 75 fps: 20,000 macroblocks a frame is
+	// 1,500,000 a second, while level 5.1 allows 983,040 and level 5.2 allows 2,073,600 - which is
+	// also exactly what the Flow decoder declares as its maximum. The driver's NVENC backend lets
+	// NVENC pick the level; this keeps the AMF backend in the same place instead of declaring a
+	// level the stream cannot fit into.
+	amf_int64 H264LevelForStream( uint32_t width, uint32_t height, uint32_t fps )
+	{
+		const int64_t macroblocks = static_cast< int64_t >( ( width + 15 ) / 16 ) * static_cast< int64_t >( ( height + 15 ) / 16 );
+		const int64_t per_second = macroblocks * ( fps > 0 ? fps : 1 );
+		if ( per_second <= 983040 && macroblocks <= 36864 )
+		{
+			return AMF_H264_LEVEL__5_1;
+		}
+		if ( per_second <= 2073600 && macroblocks <= 36864 )
+		{
+			return AMF_H264_LEVEL__5_2;
+		}
+		if ( per_second <= 4177920 && macroblocks <= 139264 )
+		{
+			return AMF_H264_LEVEL__6;
+		}
+		return AMF_H264_LEVEL__6_2;
+	}
+
 	// BGRA -> NV12 on the GPU. The matrix matches what NVENC produces for the same non-linear
 	// sRGB frames: BT.709 with studio (limited) range.
 	const char kConversionShader[] =
@@ -432,6 +457,7 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 	const amf_int64 quality = preset <= 2 ? static_cast< amf_int64 >( AMF_VIDEO_ENCODER_QUALITY_PRESET_SPEED )
 	                                      : ( preset <= 5 ? static_cast< amf_int64 >( AMF_VIDEO_ENCODER_QUALITY_PRESET_BALANCED )
 	                                                      : static_cast< amf_int64 >( AMF_VIDEO_ENCODER_QUALITY_PRESET_QUALITY ) );
+	const amf_int64 level = H264LevelForStream( width, height, fps );
 	// The AMF C++ interface has a template SetProperty that builds the AMFVariant for us.
 	const auto set_property = [ & ]( const wchar_t *name, const auto &value, const char *label, bool required ) {
 		const AMF_RESULT result = impl.encoder->SetProperty( name, value );
@@ -458,7 +484,7 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 	const bool configured =
 	    set_property( AMF_VIDEO_ENCODER_USAGE, AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY, "Usage", true ) &&
 	    set_property( AMF_VIDEO_ENCODER_PROFILE, AMF_VIDEO_ENCODER_PROFILE_HIGH, "Profile", true ) &&
-	    set_property( AMF_VIDEO_ENCODER_PROFILE_LEVEL, AMF_H264_LEVEL__5_1, "ProfileLevel", true ) &&
+	    set_property( AMF_VIDEO_ENCODER_PROFILE_LEVEL, level, "ProfileLevel", true ) &&
 	    set_property( AMF_VIDEO_ENCODER_FRAMESIZE, AMFConstructSize( static_cast< amf_int32 >( width ), static_cast< amf_int32 >( height ) ),
 	                  "FrameSize", true ) &&
 	    set_property( AMF_VIDEO_ENCODER_FRAMERATE, AMFConstructRate( fps, 1 ), "FrameRate", true ) &&
@@ -513,7 +539,8 @@ bool FlowAmfEncoder::Initialize( ID3D11Device *device, uint32_t width, uint32_t 
 	}
 
 	impl.last_error.clear();
-	DriverLog( "Flow AMF initialized H264 %ux%u@%u bitrate=%u preset=%lld", width, height, fps, bitrate, static_cast< long long >( quality ) );
+	DriverLog( "Flow AMF initialized H264 %ux%u@%u bitrate=%u preset=%lld level=%lld", width, height, fps, bitrate,
+	           static_cast< long long >( quality ), static_cast< long long >( level ) );
 	return true;
 }
 

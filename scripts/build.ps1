@@ -86,17 +86,52 @@ if ($generatorMajor -ge 18 -and ($cmakeVersion -eq $null -or $cmakeVersion -lt [
     }
 }
 
+# A build tree is bound to the generator and Visual Studio instance it was configured with. A
+# configure that failed earlier (for example the generator/instance mismatch on a VS 2026 machine)
+# leaves that cache behind, and every later "cmake --build" then fails with the very same error
+# because CMake re-checks the generator while regenerating. So compare the cache against what this
+# run needs and start over when it does not match.
+function Test-CMakeCacheUsable([string]$buildDir, [string]$generator, [string]$instance) {
+    $cache = Join-Path $buildDir "CMakeCache.txt"
+    if (-not (Test-Path $cache)) { return $false }
+    $cached = @{}
+    foreach ($line in (Get-Content $cache -ErrorAction SilentlyContinue)) {
+        if ($line -match '^([A-Za-z0-9_]+):[A-Za-z]+=(.*)$') { $cached[$Matches[1]] = $Matches[2].Trim() }
+    }
+    if ($cached["CMAKE_GENERATOR"] -ne $generator) { return $false }
+    if ($instance) {
+        $wanted = $instance -replace '\\', '/' -replace '\s', ''
+        $have = "$($cached['CMAKE_GENERATOR_INSTANCE'])" -replace '\\', '/' -replace '\s', ''
+        if ($have -ne $wanted) { return $false }
+    }
+    return $true
+}
+
 function Build-CMakeProject([string]$sourceDir) {
     $buildDir = Join-Path $sourceDir "build"
-    if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
+    $cache = Join-Path $buildDir "CMakeCache.txt"
+
+    $instance = $null
+    if ($vsInstance -and $Generator -like "Visual Studio*" -and $generatorMajor -eq $vsMajor) {
+        # Pin the instance we found with vswhere: CMake's own discovery reports "could not find any
+        # instance of Visual Studio" when Visual Studio is installed outside its default folder.
+        # The version field belongs to the generator's version, so it is only added when the
+        # installed product matches the generator.
+        $instance = $vsInstance.Path
+        if ($vsInstance.Version) { $instance = "$instance,version=$($vsInstance.Version)" }
+    }
+
+    if ((Test-Path $cache) -and (-not (Test-CMakeCacheUsable $buildDir $Generator $instance))) {
+        Write-Host "Removing the stale build tree $buildDir (it was configured for another generator or Visual Studio)"
+        Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
+        if (Test-Path $cache) {
+            Fail "Could not remove the stale build directory $buildDir. Delete it by hand (SteamVR must be closed) and run this script again."
+        }
+    }
+
+    if (-not (Test-Path $cache)) {
         $configure = @("-S", $sourceDir, "-B", $buildDir, "-G", $Generator, "-A", "x64")
-        if ($vsInstance -and $Generator -like "Visual Studio*" -and $generatorMajor -eq $vsMajor) {
-            # Pin the instance we found with vswhere: CMake's own discovery reports "could not find
-            # any instance of Visual Studio" when Visual Studio is installed outside its default
-            # folder. The version field must belong to the generator's version, so it is only added
-            # when the installed product matches the generator.
-            $instance = $vsInstance.Path
-            if ($vsInstance.Version) { $instance = "$instance,version=$($vsInstance.Version)" }
+        if ($instance) {
             $configure += @("-DCMAKE_GENERATOR_INSTANCE=$instance")
             Write-Host "Using $Generator with $($vsInstance.DisplayName) at $($vsInstance.Path)"
         }

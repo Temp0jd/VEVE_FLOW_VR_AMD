@@ -239,15 +239,14 @@ if ($Check) {
 
 $problems = @()
 $notes = @()
-foreach ($check in $checks) {
-    if (-not $check.Ok) {
-        if ($check.Blocking) { $problems += "$($check.Name): $($check.Detail). $($check.Fix)" }
-        else { $notes += "$($check.Name): $($check.Detail). $($check.Fix)" }
-    }
-}
-foreach ($check in $checks) {
-    if ($check.Ok -and $check.Name -eq "CMake" -and $check.Detail -like "*[Visual Studio]*") {
-        Note "using the CMake that ships with Visual Studio: $($check.Detail -replace ' \[[^\]]+\]$', '')"
+# The loop variable must not be called $check: PowerShell variable names are case-insensitive, so
+# that would be the -Check switch's own [switch] variable, which only accepts a boolean.
+foreach ($item in $checks) {
+    if (-not $item.Ok) {
+        if ($item.Blocking) { $problems += "$($item.Name): $($item.Detail). $($item.Fix)" }
+        else { $notes += "$($item.Name): $($item.Detail). $($item.Fix)" }
+    } elseif ($item.Name -eq "CMake" -and $item.Detail -like "*[Visual Studio]*") {
+        Note "using the CMake that ships with Visual Studio: $($item.Detail -replace ' \[[^\]]+\]$', '')"
     }
 }
 

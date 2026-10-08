@@ -155,8 +155,14 @@ if ($needsApk) {
             }
             $checks += @{ Name = "Android NDK"; Ok = $true; Detail = "$ndk$revision"; Fix = ""; Blocking = $true }
         } else {
-            $checks += @{ Name = "Android NDK"; Ok = $false; Detail = "21.4.7075529 not under $sdk\ndk"; Blocking = $true
-                Fix = "Install exactly that version with the SDK Manager: sdkmanager 'ndk;21.4.7075529'." }
+            # Say which versions are actually there: "none" and "the wrong one" need different
+            # fixes, and the version is pinned because Application.mk still says
+            # APP_PLATFORM := android-10, which newer NDKs reject.
+            $installedNdk = @(Get-ChildItem (Join-Path $sdk "ndk") -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+            $detail = "none installed under $sdk\ndk"
+            if ($installedNdk.Count -gt 0) { $detail = "need 21.4.7075529, found: $($installedNdk -join ', ')" }
+            $checks += @{ Name = "Android NDK"; Ok = $false; Detail = $detail; Blocking = $true
+                Fix = "Install exactly that version with the SDK Manager: sdkmanager 'ndk;21.4.7075529' (in Android Studio: SDK Tools tab, tick 'Show package details' first)." }
         }
     } else {
         $checks += @{ Name = "Android NDK"; Ok = $false; Detail = "unknown (no Android SDK)"; Blocking = $true

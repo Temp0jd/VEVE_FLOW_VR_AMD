@@ -128,7 +128,12 @@ if (-not $SkipApk) {
         Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     if (-not $sdk) { Fail "Android SDK not found. Install it (Android Studio) or set ANDROID_SDK_ROOT." }
     $ndk = Join-Path $sdk "ndk\21.4.7075529"
-    if (-not (Test-Path $ndk)) { Fail "Android NDK 21.4.7075529 not found under $sdk\ndk (install it with the SDK Manager)." }
+    if (-not (Test-Path $ndk)) {
+        $installedNdk = @(Get-ChildItem (Join-Path $sdk "ndk") -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+        $found = "none installed"
+        if ($installedNdk.Count -gt 0) { $found = "found: $($installedNdk -join ', ')" }
+        Fail "Android NDK 21.4.7075529 not found under $sdk\ndk ($found). Install exactly that version with the SDK Manager: sdkmanager 'ndk;21.4.7075529'."
+    }
     $props = "sdk.dir=$($sdk -replace '\\','\\' -replace ':','\:')`nndk.dir=$($ndk -replace '\\','\\' -replace ':','\:')`n"
     [IO.File]::WriteAllText((Join-Path $probe "local.properties"), $props)
 

@@ -28,11 +28,11 @@ public:
 	bool EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, std::vector< uint8_t > &out_packet, uint64_t *out_pts_us,
 	                    std::mutex *device_mutex = nullptr ) override;
 	// Next frame becomes an IDR with SPS/PPS, e.g. so a newly connected client can start decoding.
-	void RequestKeyframe() override;
+	void RequestKeyframe() override { sent_headers_ = false; }
 	void Shutdown() override;
 
-	const std::string &LastError() const override;
-	bool IsInitialized() const override;
+	const std::string &LastError() const override { return last_error_; }
+	bool IsInitialized() const override { return encoder_ != nullptr; }
 	const char *BackendName() const override { return "NVENC"; }
 
 private:

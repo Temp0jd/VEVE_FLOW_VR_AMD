@@ -3,6 +3,7 @@
 buildscript {
     repositories {
         google()
+        mavenCentral() // jcenter now only redirects here; resolve directly
         jcenter()
     }
     dependencies {
@@ -14,6 +15,7 @@ buildscript {
 allprojects {
     repositories {
         google()
+        mavenCentral() // jcenter now only redirects here; resolve directly
         jcenter()
         maven {
             // assign your wavevr local respository

@@ -4,6 +4,7 @@
 #include "driverlog.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -240,6 +241,12 @@ struct FlowAmfEncoder::Impl
 	ID3D11Texture2D *nv12_texture = nullptr;
 	ID3D11RenderTargetView *luma_target = nullptr;
 	ID3D11RenderTargetView *chroma_target = nullptr;
+	// Signals when the GPU has finished converting into nv12_texture. ID3D11DeviceContext::Flush()
+	// only hands the command buffer to the GPU, it does not wait for it to execute, and AMF's
+	// hardware encoder reads the surface from a different engine with no cross-engine sync - so
+	// without waiting on this the encoder reads the untouched (black) surface every frame.
+	ID3D11Query *conversion_done = nullptr;
+	bool conversion_wait_reported = false;
 	ID3D11VertexShader *vertex_shader = nullptr;
 	ID3D11PixelShader *luma_shader = nullptr;
 	ID3D11PixelShader *chroma_shader = nullptr;
@@ -349,6 +356,14 @@ bool FlowAmfEncoder::CreateConversionResources()
 		return false;
 	}
 
+	// Completion marker for the conversion, waited on before every submit (see EncodeTexture).
+	D3D11_QUERY_DESC query_desc{};
+	query_desc.Query = D3D11_QUERY_EVENT;
+	if ( FAILED( impl.device->CreateQuery( &query_desc, &impl.conversion_done ) ) )
+	{
+		impl.conversion_done = nullptr; // not fatal: EncodeTexture falls back to a plain Flush
+	}
+
 	const auto compile = [ & ]( const char *entry, const char *target, ID3DBlob **blob ) {
 		ID3DBlob *error_blob = nullptr;
 		const HRESULT hr = D3DCompile( kConversionShader, std::strlen( kConversionShader ), nullptr, nullptr, nullptr, entry, target, 0, 0, blob, &error_blob );
@@ -420,6 +435,7 @@ void FlowAmfEncoder::ReleaseConversionResources()
 	SafeRelease( impl.vertex_shader );
 	SafeRelease( impl.chroma_target );
 	SafeRelease( impl.luma_target );
+	SafeRelease( impl.conversion_done );
 	SafeRelease( impl.nv12_texture );
 	if ( impl.device_context != nullptr )
 	{
@@ -712,7 +728,33 @@ bool FlowAmfEncoder::EncodeTexture( ID3D11Texture2D *texture, uint64_t pts_us, s
 		{
 			return false;
 		}
-		impl.device_context->Flush(); // AMF must not read the texture before the conversion is done
+
+		// Wait for the conversion to actually finish on the GPU before handing the surface to AMF.
+		// Flush() alone is not enough: it queues the commands but returns immediately, and the encoder
+		// reads the surface from its own engine, so it would otherwise encode the untouched surface -
+		// which is exactly what "the stream is black although the conversion wrote a proper image"
+		// looks like. Bounded, so a stuck GPU cannot hang the encode thread.
+		if ( impl.conversion_done != nullptr )
+		{
+			impl.device_context->End( impl.conversion_done );
+			impl.device_context->Flush();
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( 50 );
+			HRESULT ready = S_FALSE;
+			while ( ( ready = impl.device_context->GetData( impl.conversion_done, nullptr, 0, 0 ) ) == S_FALSE &&
+			        std::chrono::steady_clock::now() < deadline )
+			{
+				Sleep( 0 );
+			}
+			if ( ready == S_FALSE && !impl.conversion_wait_reported )
+			{
+				impl.conversion_wait_reported = true;
+				DriverLog( "Flow AMF: the NV12 conversion did not finish within 50 ms; the encoder may read a stale surface" );
+			}
+		}
+		else
+		{
+			impl.device_context->Flush();
+		}
 
 		impl.surface->SetPts( static_cast< amf_pts >( pts_us ) * 10 ); // amf_pts counts 100 ns
 		const amf_int64 forced = impl.force_idr ? AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR : AMF_VIDEO_ENCODER_PICTURE_TYPE_NONE;

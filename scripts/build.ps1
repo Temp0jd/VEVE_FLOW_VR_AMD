@@ -103,18 +103,25 @@ if (-not $SkipApk) {
         if ($version -match 'version "1\.8') { $javaHome = $env:JAVA_HOME }
     }
     if (-not $javaHome) {
-        # tools\jdk8\<jdk>\ , and tools\jdk8\ itself for an archive unpacked without its own
-        # folder. The version is checked so a stray folder there cannot be picked up.
-        $bundledRoot = Join-Path $Root "tools\jdk8"
-        $candidates = @($bundledRoot) + @(Get-ChildItem $bundledRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        # tools\jdk8\<jdk>\, tools\jdk8\ itself, or one level under tools\ (an archive unpacked
+        # a level too high). The version is checked so a stray folder cannot be picked up, and a
+        # JRE is told apart from a missing JDK.
+        $candidates = @()
+        foreach ($base in @((Join-Path $Root "tools\jdk8"), (Join-Path $Root "tools"))) {
+            $candidates += $base
+            foreach ($dir in (Get-ChildItem $base -Directory -ErrorAction SilentlyContinue)) { $candidates += $dir.FullName }
+        }
+        $jreFound = $null
         foreach ($candidate in $candidates) {
             $java = Join-Path $candidate "bin\java.exe"
-            if (-not (Test-Path (Join-Path $candidate "bin\javac.exe"))) { continue }
+            if (-not (Test-Path $java)) { continue }
+            if (-not (Test-Path (Join-Path $candidate "bin\javac.exe"))) { $jreFound = $candidate; continue }
             $version = cmd /c "`"$java`" -version 2>&1" | Out-String
             if ($version -match 'version "1\.8') { $javaHome = $candidate; break }
         }
+        if ($jreFound) { Fail "$jreFound is a JRE (bin\java.exe without bin\javac.exe). Install the Temurin JDK 8, not the JRE." }
     }
-    if (-not $javaHome) { Fail "JDK 8 not found. Set JAVA_HOME to a JDK 8, or unpack Temurin JDK 8 into $Root\tools\jdk8 (the folder holding bin\java.exe and bin\javac.exe)." }
+    if (-not $javaHome) { Fail "JDK 8 not found. Set JAVA_HOME to a JDK 8, or unpack the Temurin JDK 8 (not the JRE) into $Root\tools\jdk8 (the folder holding bin\java.exe and bin\javac.exe)." }
 
     # local.properties is machine specific (ignored by git): write it from the Android SDK location.
     $sdk = @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME, (Join-Path $env:LOCALAPPDATA "Android\Sdk")) |

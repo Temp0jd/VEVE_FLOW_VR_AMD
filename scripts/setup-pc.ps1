@@ -168,8 +168,11 @@ if ($needsApk) {
     if ($jdk8) {
         $checks += @{ Name = "JDK 8"; Ok = $true; Detail = $jdk8; Fix = ""; Blocking = $true }
     } else {
-        $checks += @{ Name = "JDK 8"; Ok = $false; Detail = "not found"; Blocking = $true
-            Fix = "Set JAVA_HOME to a JDK 8, or unpack Temurin JDK 8 into tools\jdk8\<jdk> (see README.md, 'Build environment')." }
+        $why = Describe-Jdk8Problem $Root
+        $detail = "not found"
+        if ($why) { $detail = $why }
+        $checks += @{ Name = "JDK 8"; Ok = $false; Detail = $detail; Blocking = $true
+            Fix = "Install the Temurin JDK 8 (the JDK: it contains bin\javac.exe, the JRE does not), then either set JAVA_HOME to it or unpack it into $Root\tools\jdk8." }
     }
 }
 

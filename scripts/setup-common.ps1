@@ -84,23 +84,52 @@ function Find-Adb {
 }
 
 # AGP 3.5 wants a real JDK 8 (javac, not just a JRE).
-function Find-Jdk8([string]$root) {
+# Candidate folders that may hold a Java install: JAVA_HOME, then the documented tools\jdk8 (and
+# one level below it), then tools\ itself (and one level below it) so a JDK unpacked a level too
+# high is still found.
+function Get-Jdk8Candidates([string]$root) {
     $candidates = @()
     if ($env:JAVA_HOME) { $candidates += $env:JAVA_HOME }
-    # tools\jdk8\<jdk>\ , and tools\jdk8\ itself for an archive unpacked without its own
-    # folder (then bin\java.exe sits directly in tools\jdk8).
-    $bundledRoot = Join-Path $root "tools\jdk8"
-    $candidates += $bundledRoot
-    foreach ($dir in (Get-ChildItem $bundledRoot -Directory -ErrorAction SilentlyContinue)) { $candidates += $dir.FullName }
-    foreach ($candidate in $candidates) {
-        $java = Join-Path $candidate "bin\java.exe"
+    foreach ($base in @((Join-Path $root "tools\jdk8"), (Join-Path $root "tools"))) {
+        $candidates += $base
+        foreach ($dir in (Get-ChildItem $base -Directory -ErrorAction SilentlyContinue)) { $candidates += $dir.FullName }
+    }
+    return ($candidates | Where-Object { $_ } | Select-Object -Unique)
+}
+
+# Output of "<folder>\bin\java.exe -version", or $null when there is no java there.
+function Get-JavaVersion([string]$folder) {
+    $java = Join-Path $folder "bin\java.exe"
+    if (-not (Test-Path $java)) { return $null }
+    # via cmd: in Windows PowerShell 5.1, redirecting a native exe's stderr throws under "Stop"
+    return (cmd /c "`"$java`" -version 2>&1" | Out-String)
+}
+
+function Find-Jdk8([string]$root) {
+    foreach ($candidate in (Get-Jdk8Candidates $root)) {
         if (-not (Test-Path (Join-Path $candidate "bin\javac.exe"))) { continue }
-        if (-not (Test-Path $java)) { continue }
-        # via cmd: in Windows PowerShell 5.1, redirecting a native exe's stderr throws under "Stop"
-        $version = cmd /c "`"$java`" -version 2>&1" | Out-String
-        if ($version -match 'version "1\.8') { return $candidate }
+        $version = Get-JavaVersion $candidate
+        if ($version -and ($version -match 'version "1\.8')) { return $candidate }
     }
     return $null
+}
+
+# Why no JDK 8 was usable: "" when nothing Java-like was found at all, otherwise the reason, so
+# the caller can distinguish "not installed" from "a JRE" or "the wrong version".
+function Describe-Jdk8Problem([string]$root) {
+    foreach ($candidate in (Get-Jdk8Candidates $root)) {
+        $hasJava = Test-Path (Join-Path $candidate "bin\java.exe")
+        if (-not $hasJava) { continue }
+        if (-not (Test-Path (Join-Path $candidate "bin\javac.exe"))) {
+            return "$candidate has bin\java.exe but no bin\javac.exe, so it is a JRE: the Android build needs the JDK 8."
+        }
+        $version = Get-JavaVersion $candidate
+        if ($version -and ($version -match 'version "1\.8')) { continue } # usable, keep looking
+        $found = "unknown"
+        if ($version -and ($version -match 'version "([^"]+)"')) { $found = $Matches[1] }
+        return "$candidate is Java $found, but 1.8 is required."
+    }
+    return ""
 }
 
 # Visual Studio's own toolchain (full IDE or the standalone Build Tools); $null when neither is

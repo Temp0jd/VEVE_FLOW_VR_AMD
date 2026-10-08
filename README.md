@@ -410,9 +410,37 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 
 - **先跑 `setup-pc.ps1 -Check`**：它会告诉你到底缺哪个、缺在哪、怎么装（比逐项手动确认快）。
 - **`cmake not found`**：装 Build Tools 时 CMake 不会进 PATH。脚本会自动找到 VS/Build Tools 内附的那份；若真没有，`winget install Kitware.CMake` 或重跑安装器勾「对 C++ 的 CMake 工具」。
+- **`could not find any instance of Visual Studio`**：Visual Studio 装在**非默认目录**（例如 `D:\VS2022`）或只装了 **Build Tools** 时，CMake 自己的实例探测会失效，即使 vswhere 能找到。脚本会把找到的实例直接指给 CMake（`-DCMAKE_GENERATOR_INSTANCE=<路径>,version=<build号>`），不需要重装 VS。
 - **建置驱动失败（文件被锁定）**：先关闭 SteamVR（`setup-pc.ps1` 会自己检查并提示）。
 - **`JDK 8 not found`**：`JAVA_HOME` 指向 JRE 而不是 JDK（要 `bin\javac.exe`），或版本不是 1.8。
 - **`Wave SDK missing`**：`Wave_Native_SDK\repo\com\htc\vr\wvr_client` 不存在（见“Wave SDK”）。
+
+### 换机器 / 把仓库搬到别的盘
+
+搬动仓库本身没问题（程式里没有写死路径），但**建置产物和注册记录里存的是绝对路径**，所以搬完要重跑安装。推荐顺序：
+
+```powershell
+# 1) 搬之前：注销旧路径（否则旧路径会留在 SteamVR 里，指向一个不存在的目录）
+powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
+
+# 2) 关掉 SteamVR，然后搬目录
+Move-Item C:\Users\你现在的位置\VEVE_FLOW_VR_AMD D:\VEVE_FLOW_VR_AMD
+
+# 3) 删掉旧产物：CMakeCache、Gradle 中间产物里都是旧绝对路径
+cd D:\VEVE_FLOW_VR_AMD
+Remove-Item -Recurse -Force pc\flow_steamvr_driver\build, pc\flow_dashboard_helper\build
+Remove-Item -Recurse -Force Wave_Native_SDK\samples\wvr_flow_probe\app\build, Wave_Native_SDK\samples\wvr_flow_probe\app\.cxx, Wave_Native_SDK\samples\wvr_flow_probe\.gradle
+Remove-Item Wave_Native_SDK\samples\wvr_flow_probe\local.properties -ErrorAction SilentlyContinue
+
+# 4) 重新安装（重新注册驱动/后台程序、重写设置、更新防火墙规则的程式路径）
+powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1 -Video
+```
+
+- `tools\jdk8`、`Wave_Native_SDK\repo` 在仓库里，跟着一起搬，不用重新下载。
+- `ANDROID_SDK_ROOT`、`JAVA_HOME`、`GRADLE_USER_HOME`（在 `%USERPROFILE%\.gradle`）跟仓库位置无关，不用改。
+- 防火墙规则记的是绝对程式路径，脚本重跑时会自动更新（会提示 `updated inbound rule`）。
+- **搬到更短的路径其实更好**：`D:\VEVE_FLOW_VR_AMD` 比 `C:\Users\...\VEVE_FLOW_VR_AMD` 短，Android/NDK 的建置对 Windows 260 字元路径限制比较敏感。
+- 若 `git submodule status` 出现异常（`pc/openvr` 前面是 `-` 或报错），跑 `git submodule update --init` 即可。
 
 ### 诊断工具
 

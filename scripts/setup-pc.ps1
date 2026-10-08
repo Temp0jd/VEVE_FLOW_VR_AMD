@@ -310,6 +310,7 @@ if (-not $NoFirewall) {
             $result = Add-FirewallRule $target.Name $target.Path
             switch ($result) {
                 "added" { Note "added inbound rule: $($target.Name)" }
+                "updated" { Note "updated inbound rule (the program path had changed): $($target.Name)" }
                 "present" { Note "inbound rule already present: $($target.Name)" }
                 "missing" { Warn "not found, skipped: $($target.Path)" }
                 "unsupported" { Warn "New-NetFirewallRule unavailable; allow vrserver.exe on the private network when Windows asks." }

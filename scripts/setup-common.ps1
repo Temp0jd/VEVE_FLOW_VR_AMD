@@ -219,13 +219,24 @@ function Test-Elevated {
 
 # Inbound rule for one program on the private profile. SteamVR's vrserver.exe owns the video,
 # pose and audio sockets (the driver DLL runs inside it), the helper owns the desktop layer.
+# The rule stores an absolute program path, so moving this repository onto another drive leaves it
+# stale: an existing rule is repointed rather than trusted by name alone.
 function Add-FirewallRule([string]$displayName, [string]$program) {
     if (-not (Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue)) { return "unsupported" }
     if (-not (Test-Path $program)) { return "missing" }
     try {
-        if (Get-NetFirewallRule -DisplayName $displayName -ErrorAction SilentlyContinue) { return "present" }
+        $updated = $false
+        $existing = Get-NetFirewallRule -DisplayName $displayName -ErrorAction SilentlyContinue
+        if ($existing) {
+            $current = @($existing | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty Program)
+            if ($current -and ($current -eq $program)) { return "present" }
+            $existing | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+            $updated = $true
+        }
         New-NetFirewallRule -DisplayName $displayName -Direction Inbound -Action Allow -Profile Private `
             -Program $program -Description "VEVE_FLOW_VR (HTC VIVE Flow stream)" | Out-Null
+        if ($updated) { return "updated" }
         return "added"
     } catch {
         return "failed"

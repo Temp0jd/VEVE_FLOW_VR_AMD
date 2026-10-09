@@ -56,8 +56,7 @@ PC 跑 SteamVR，画面由显卡硬件编码器（NVIDIA NVENC / AMD AMF）编�
 | HTC Wave Native SDK **4.5.0** | 见下 |
 
 **Wave SDK**（授权原因不在仓库里）：到 [developer.vive.com](https://developer.vive.com)（需登录）下载 **Wave Native SDK 4.5.0**，把压缩包里的 `repo` 文件夹整个拷到本项目的 `Wave_Native_SDK\repo`，确认存在 `Wave_Native_SDK\repo\com\htc\vr\wvr_client\4.5.0-u02\wvr_client-4.5.0-u02.aar`。
-
-为什么卡在 NDK 21.4 / JDK 8：Flow 端 APK 沿用 Wave SDK 范例的 Gradle 5.6.1 + AGP 3.5 组合，只吃 JDK 8，NDK 版本也写在范例的建置设置里。第一次建置 APK 需要网络下载依赖。
+（NDK/JDK 版本是 Wave SDK 范例的 Gradle 5.6.1 + AGP 3.5 组合钉死的；第一次建置 APK 需要网络下载依赖。）
 
 ### 2. 安装（各跑一次）
 
@@ -74,16 +73,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-flow.ps1
 
 - 只看 VR 视频：`setup-pc.ps1 -Video`（跳过 Desktop+，120 Mbit/s，关闲置待机）
 - 不确定环境装齐没：`setup-pc.ps1 -Check`（纯检查，逐项列出缺什么、怎么装；全就绪退出码为 0）
-- 两步合一：`scripts\setup.ps1 [-Video]`
-- “人一共要动几次手”的精简清单见 **SETUP.md**
-
-卸载（驱动与背景程序的注册移除，Desktop+ 保留）：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 [-RestoreSettings] [-RemoveApk]
-```
-
-`-RestoreSettings` 还原安装前的设置备份（`*.bak-veve`），`-RemoveApk` 连头盔上的 App 一起卸。
+- 两步合一：`scripts\setup.ps1 [-Video]`；精简人工清单见 **SETUP.md**
 
 ### 3. 每天用
 
@@ -95,14 +85,22 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-flow.ps1 -Launch
 
 连上约 1.5 秒后 Desktop+ 分页自动打开，看到 PC 桌面。
 
+### 卸载
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 [-RestoreSettings] [-RemoveApk]
+```
+
+移除驱动与背景程序的注册（Desktop+ 保留）。`-RestoreSettings` 还原安装前的设置备份（`*.bak-veve`），`-RemoveApk` 连头盔上的 App 一起卸。
+
 ---
 
 ## 出问题先看这里
 
 | 症状 | 原因 / 处置 |
 |---|---|
-| **进游戏整片灰色 #4F5A64，PC 窗口正常** | SteamVR 判定追踪失效：坐姿游戏缺“坐姿原点”。背景程序会自动补设（见下面详解）；没好的话用 SteamVR 菜单「重置坐姿位置」 |
-| 画面全黑、没有串流 | GPU 编码器没起来，看日志（见下面详解） |
+| **进游戏整片灰色 #4F5A64，PC 窗口正常** | 坐姿游戏缺“坐姿原点”，背景程序会自动补设（详解见下）；没好的话用 SteamVR 菜单「重置坐姿位置」 |
+| 画面全黑、没有串流 | GPU 编码器没起来，看日志（详解见下） |
 | Flow 连不上 | 防火墙挡了 `vrserver.exe`、或两台不在同一网段（最常见） |
 | 画面中央“选择 USB 模式” | Flow 插着 USB 的系统提示，选“不运行任何动作”或拔掉 USB |
 | 游戏变暗、分辨率变低 | 控制台还开着抢输入焦点，按小键盘 `*` 关掉 |
@@ -110,7 +108,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-flow.ps1 -Launch
 
 ### 详解：灰屏 #4F5A64（坐姿原点）
 
-坐姿游戏（Unity 默认）需要追踪空间的坐姿原点，否则 SteamVR 把画面淡出成灰色 `trackingLossColor`。驱动给设备设了追踪空间 "FLOW"，背景程序在 Flow 连上后自动补设坐姿原点（无效时每 2 秒重试，最多 1 分钟）。看背景程序日志 `pc\flow_dashboard_helper\build\dist\flow_dashboard_helper.log`：
+坐姿游戏（Unity 默认）需要追踪空间的坐姿原点，否则 SteamVR 把画面淡出成灰色 `trackingLossColor`。驱动给设备设了追踪空间 "FLOW"，背景程序在 Flow 连上后自动补设（无效时每 2 秒重试，最多 1 分钟）。看背景程序日志 `pc\flow_dashboard_helper\build\dist\flow_dashboard_helper.log`：
 
 | 日志 | 含义 |
 |---|---|
@@ -141,39 +139,21 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-flow.ps1 -Launch
   或指向本地下好的文件：`-GradleDistributionUrl file:///D:/downloads/gradle-5.6.1-all.zip`。想还原：`git checkout -- Wave_Native_SDK/samples/wvr_flow_probe/gradle/wrapper/gradle-wrapper.properties`。
 - **`Could not resolve ...`**：发行版下来了但 Maven 仓库不通 → 设代理再跑：`$env:HTTPS_PROXY = 'http://127.0.0.1:7890'`
 - **`cmake not found`**：脚本会自动找 VS/Build Tools 内附的 CMake；真没有就 `winget install Kitware.CMake`。
-- **`could not find any instance of Visual Studio`**：VS 装在非默认目录或只装了 Build Tools 时 CMake 探测失效，脚本会把 vswhere 找到的实例直接指给 CMake（`-DCMAKE_GENERATOR_INSTANCE`），不用重装。
-- **`the version field is not 4 integer components starting in 17`**：装了 VS 2026（v18）但用了 2022 的生成器。脚本按 vswhere 报的版本自动选生成器（17→`VS 2022`，18→`VS 2026`），不用手动改。
+- **`could not find any instance of Visual Studio`** / **`the version field is not 4 integer components starting in 17`**：VS 装在非默认目录、只装了 Build Tools、或装了 VS 2026（v18）——脚本都会自动处理（按 vswhere 报的版本选生成器并把实例直接指给 CMake），不用重装或改设置。
 - **建置驱动失败（文件被锁定）**：先关 SteamVR。
 - **`JDK 8 not found`**：`JAVA_HOME` 指到了 JRE 或版本不是 1.8（要 `bin\javac.exe`）。
 - **`Wave SDK missing`**：`Wave_Native_SDK\repo\com\htc\vr\wvr_client` 不存在（见“快速开始”）。
 - **Desktop+ 设置被改回去**：Desktop+ 退出时会写回自己的设置；改之前先关 SteamVR，或直接重跑 `install.ps1`。
 
-### 搬仓库到别的盘
-
-代码里没有写死路径，但**建置产物和注册记录里存的是绝对路径**，搬完要重装：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1     # 1) 先注销旧路径
-# 2) 关掉 SteamVR，搬目录
-# 3) 删旧产物：pc\*\build、wvr_flow_probe\app\build、.cxx、.gradle、local.properties
-powershell -ExecutionPolicy Bypass -File scripts\setup-pc.ps1      # 4) 重新建置注册
-```
-
-`tools\jdk8`、`Wave_Native_SDK\repo` 在仓库里跟着搬；防火墙规则记的绝对路径会在重跑时自动更新。搬到更短的路径（如 `D:\VEVE_FLOW_VR_AMD`）反而更稳（Windows 260 字符路径限制）。
-
 ---
 
-## 日常使用细节
+## 日常使用
 
 1. Flow 与 PC 同 Wi-Fi，不需要 USB。
 2. 启动 SteamVR（会一并拉起 SteamVR Home、Desktop+、背景程序）。
 3. Flow 上打开 **Flow Probe**，连上约 1.5 秒后看到 PC 桌面。
-4. 游戏开始 → 控制台自动关；游戏结束 → 自动再开。摘下再戴上也会重开。
+4. 游戏开始 → 控制台自动关；游戏结束（回到 Home）→ 自动再开。摘下再戴上也会重开。
 5. 激光点到面板外会关掉控制台：按 `*` 叫回来。
-
-### 指针门控（控制台开着时）
-
-控制台开着时激光若一直跟着头/手，Desktop+ 的光标会乱跑，所以**平常激光不碰面板**（实体鼠标照常可用）；按住小键盘按键或捏合/握拳时激光才出现，约 0.2 秒后送点击。白色准星标出点击落点（只在手部检测关闭时显示）。游戏中不受影响。实作在 `flow_pointer_gate.h`。
 
 ### 手部追踪（双手 = Index 控制器）
 
@@ -203,9 +183,13 @@ Flow 的镜头追踪双手（每手 26 关节），驱动转成 SteamVR 的 Valv
 
 **NumLock = 开关手部检测**：关闭时忽略 Flow 的手，小键盘固定是跟头的激光。控制台里**有准星 = 手部检测关，没准星 = 开**。SteamVR 运行期间小键盘不会打字到电脑（只有小键盘的 ← 照常）。
 
+### 指针门控（控制台开着时）
+
+控制台开着时激光若一直跟着头/手，Desktop+ 的光标会乱跑，所以**平常激光不碰面板**（实体鼠标照常可用）；按住小键盘按键或捏合/握拳时激光才出现，约 0.2 秒后送点击。白色准星标出点击落点（只在手部检测关闭时显示）。游戏中不受影响。实作在 `flow_pointer_gate.h`。
+
 ### 清晰桌面（Desktop+ 面板的 1:1 图层）
 
-串流画面在 Flow 上被采样两次，小字会糊；Flow 系统界面用的合成器图层只采样一次，所以背景程序把 Desktop+ 面板贴图单独编码（TCP 8005）送过去，以 Wave 圆柱图层 1:1 盖在面板位置：
+串流画面在 Flow 上被采样两次，小字会糊；合成器图层只采样一次。背景程序把 Desktop+ 面板贴图单独编码（TCP 8005）送过去，以 Wave 圆柱图层 1:1 盖在面板位置：
 
 - 面板本身被染黑（串流画面比头慢约 55 ms，不染黑转头时模糊的那份会露出来）；**不能改透明度**（alpha 0 时面板不吃点击）。
 - 控制台关闭时暂停串流（按 `*` 叫回来立即清晰）；Flow 断线时面板恢复原色。
@@ -217,7 +201,30 @@ Windows 默认输出设备环回采集 → 48 kHz 16-bit 立体声 PCM → TCP 8
 
 ---
 
-## 进阶
+## 已知限制
+
+- **当前只用 3DoF**（不是硬件上限）：Flow 本身是 6DoF 机器（官网规格：双摄像头 inside-out 6DoF 头显追踪；manifest 声明 `3,6DoF`；Wave 姿态带 `is6DoFPose`），但 App 用 `WVR_PoseOriginModel_OriginOnHead` 取姿态、位置恒为原点，驱动再加固定 1.0 m 身高偏移。启用方法见待办第一项。启用前最合适的场景是看视频与坐姿游戏。
+- 小字偏软，主要靠放大 Desktop+ 画面（目前 248 cm）与“清晰桌面”图层改善。
+- 往返延迟约 55 ms；转头有 timewarp 补偿，平移没有。
+- 小键盘的 ←（Backspace）与主键盘无法区分，不拦截。
+- 清晰桌面同时只能一个 overlay（Flow 只有一组额外图层）。
+- 手部控制器还没有手指骨架（`/input/skeleton`）：游戏里显示 Index 控制器模型，不会动手指。
+- 摇杆只能用小键盘，手势没有对应。
+- **AMD（AMF）路径比 NVENC 多约一帧（≈ 13 ms）编码延迟**（硬件管线延迟），姿态与画质诊断已按帧对齐。AMD 路径已在 RX 9070 XT 上实测并修掉了“编码器读到空表面输出纯黑帧”的问题（由驱动自建带 `D3D11_BIND_VIDEO_ENCODER` 的 NV12 纹理交给 AMF 包装）；若画面仍黑，看 `vrserver.txt` 里 `Flow AMF` 开头的行。
+- Flow 摘下约 5 秒休眠，不 root 无法永久改长（秒数在 OEM 服务数据库里，写入要系统签名）；需要时用开发模式（重启失效）。
+
+## 待办
+
+- **启用 6DoF（硬件已支持，最优先）**：Flow 官方规格即双摄像头 inside-out 6DoF 头显追踪，manifest 已声明 `NumDoFHmd = "3,6DoF"`，Wave 姿态也带 `is6DoFPose`（日志 `hmdDoF=3|6`）。要做的是：App 把 origin model 从 `OriginOnHead` 换成 `OriginOnGround`（或 tracking observer）并把 x/y/z 透传（`PosePacket` 字段已有）；驱动去掉固定 1.0 m 身高偏移、改用实测高度；实测漂移与追踪丢失恢复。先只换 origin model 走两步，看 `adb logcat -s FlowProbe` 里的 `hmdDoF` / `hmdXYZ` 验证。
+- 手指骨架：把 Flow 的 26 关节转成 OpenVR 手部骨架，Half-Life: Alyx、VRChat 等就能显示手指。
+- 长时间开手部追踪时 Flow 的温度与降频（目前只测过几分钟）。
+- 多键同时操作：方案一是扩手势（拇指碰食指/中指/无名指 = Trigger/A/B），方案二是两手各握一支蓝牙手把（按键摇杆来自手把，位置来自手部追踪；需先实测握着手把时 Flow 是否还追得到手），或两者并存。
+- 简化建置环境（NDK/JDK 升级）。
+
+---
+
+<details>
+<summary><b>进阶：运作原理、五条连接、编码器、设置参考、开发模式</b></summary>
 
 ### 运作原理（数据流）
 
@@ -250,9 +257,7 @@ Windows 默认输出设备环回采集 → 48 kHz 16-bit 立体声 PCM → TCP 8
 
 **Flow 不用设 PC 的 IP**：PC 在 UDP 8002 广播，Flow 连 TCP 8001 后从连接来源得知 PC 地址。唯一要求是同一网段、广播送得到。
 
-### 延迟
-
-往返约 **55 ms**。转头由 Wave timewarp 按“该帧渲染时用的姿态”补偿（序号随每帧附上），所以转头感觉不到延迟；平移本来就没有，不补偿。
+往返延迟约 **55 ms**。转头由 Wave timewarp 按“该帧渲染时用的姿态”补偿（序号随每帧附上），所以转头感觉不到延迟；平移本来就没有，不补偿。
 
 ### 显卡与编码器（NVENC / AMF）
 
@@ -306,7 +311,7 @@ Flow virtual display: AMF encoder on <卡名> (vendor 0x1002)
 | `vsync_to_photons` | `0.011` | 光子延迟补偿（秒） |
 | `display_frequency` | `75` | 面板更新率（Hz） |
 
-### 其他设置
+#### 其他设置
 
 | 设置 | 位置 | 套用方式 |
 |---|---|---|
@@ -329,31 +334,10 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 
 只想验证“PC 桌面能不能串到 Flow”时用：`pc\flow_desktop_streamer\`（.NET + Python）与 `wvr_flow_probe\tools\` 下的脚本，用 ffmpeg 抓桌面直接送 TCP 8001。没有姿态回馈、控制器、音频与清晰桌面。`--encoder` 可选 `x264` / `nvenc` / `amf` / `qsv` / `mf`。
 
----
+</details>
 
-## 已知限制
-
-- **当前只用 3DoF**（不是硬件上限）：Flow 本身是 6DoF 机器（官网规格：双摄像头 inside-out 6DoF 头显追踪；manifest 声明 `3,6DoF`；Wave 姿态带 `is6DoFPose`），但 App 用 `WVR_PoseOriginModel_OriginOnHead` 取姿态、位置恒为原点，驱动再加固定 1.0 m 身高偏移。启用方法见待办第一项。启用前最合适的场景是看视频与坐姿游戏。
-- 小字偏软，主要靠放大 Desktop+ 画面（目前 248 cm）与“清晰桌面”图层改善。
-- 往返延迟约 55 ms；转动有 timewarp 补偿，平移没有。
-- 小键盘的 ←（Backspace）与主键盘无法区分，不拦截。
-- 清晰桌面同时只能一个 overlay（Flow 只有一组额外图层）。
-- 手部控制器还没有手指骨架（`/input/skeleton`）：游戏里显示 Index 控制器模型，不会动手指。
-- 摇杆只能用小键盘，手势没有对应。
-- **AMD（AMF）路径比 NVENC 多约一帧（≈ 13 ms）编码延迟**（硬件管线延迟），姿态与画质诊断已按帧对齐。AMD 路径已在 RX 9070 XT 上实测并修掉了“编码器读到空表面输出纯黑帧”的问题（由驱动自建带 `D3D11_BIND_VIDEO_ENCODER` 的 NV12 纹理交给 AMF 包装）；若画面仍黑，看 `vrserver.txt` 里 `Flow AMF` 开头的行。
-- Flow 摘下约 5 秒休眠，不 root 无法永久改长（秒数在 OEM 服务数据库里，写入要系统签名）；需要时用开发模式（重启失效）。
-
-## 待办
-
-- 手指骨架：把 Flow 的 26 关节转成 OpenVR 手部骨架，Half-Life: Alyx、VRChat 等就能显示手指。
-- 长时间开手部追踪时 Flow 的温度与降频（目前只测过几分钟）。
-- 多键同时操作：方案一是扩手势（拇指碰食指/中指/无名指 = Trigger/A/B），方案二是两手各握一支蓝牙手把（按键摇杆来自手把，位置来自手部追踪；需先实测握着手把时 Flow 是否还追得到手），或两者并存。
-- **启用 6DoF（硬件已支持，最优先）**：Flow 官方规格即双摄像头 inside-out 6DoF 头显追踪，manifest 已声明 `NumDoFHmd = "3,6DoF"`，Wave 姿态也带 `is6DoFPose`（日志 `hmdDoF=3|6`）。要做的是：App 把 origin model 从 `OriginOnHead` 换成 `OriginOnGround`（或 tracking observer）并把 x/y/z 透传（`PosePacket` 字段已有）；驱动去掉固定 1.0 m 身高偏移、改用实测高度；实测漂移与追踪丢失恢复。先只换 origin model 走两步，看 `adb logcat -s FlowProbe` 里的 `hmdDoF` / `hmdXYZ` 验证。
-- 简化建置环境（NDK/JDK 升级）。
-
----
-
-## 附录 A：通信协定（FLOWH264 v7）
+<details>
+<summary><b>附录 A：通信协定（FLOWH264 v7）</b></summary>
 
 由 `virtual_display_device.cpp`（PC 端送出）与 `MainActivity.java`（Flow 端解析）对照整理；**Flow 端解析器是唯一权威**。所有整数为**大端**，float 存 IEEE-754 比特样式。
 
@@ -403,9 +387,12 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 
 纯文本广播 `FLOWH264_PC <port>`（port = 8001），周期性送出直到 Flow 连上。
 
----
+</details>
 
-## 附录 B：文件地图
+<details>
+<summary><b>附录 B：文件地图、路径与诊断工具</b></summary>
+
+### 文件地图
 
 | 文件 | 职责 |
 |---|---|
@@ -431,28 +418,13 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 | `flowvr/resources/input/*.json` | SteamVR 输入绑定 |
 | `flow_probe/` | 从 Flow 采集的硬件信息（仅供参考；含序号的文件不公开） |
 
-## 附录 C：文件与安装位置
+### 路径速查
 
-> 不想记这些？跑一次 `scripts\setup-pc.ps1 -Check`，它会把每一项的实际路径印出来。
-
-**需要你自己放的两项**（都在 `.gitignore`，重新 clone 后要再放）：
-
-| 东西 | 放哪 |
-|---|---|
-| Wave SDK 的 `repo` | `<仓库>\Wave_Native_SDK\repo\` |
-| JDK 8 | `JAVA_HOME` 指向它，或解压到 `<仓库>\tools\jdk8\<任意名>\` |
-
-**脚本自己去找的**：VS（vswhere）、Android SDK（`ANDROID_SDK_ROOT` → `ANDROID_HOME` → `%LOCALAPPDATA%\Android\Sdk`）、NDK（必须在 `<SDK>\ndk\21.4.7075529\`）、SteamVR（`openvrpaths.vrpath`）、Desktop+（`libraryfolders.vdf`）。**git 自动取的**：`pc\openvr`（submodule）、`pc\third_party`（NVENC/AMF 头文件，已在仓库里）。
-
-**建置产物**（都在 `.gitignore`）：
-
-| 产物 | 路径 |
-|---|---|
-| SteamVR 驱动（注册的就是这个目录）与日志 | `pc\flow_steamvr_driver\build\dist\flowvr\`（`logs\`） |
-| 背景程序与它的日志 | `pc\flow_dashboard_helper\build\dist\` |
-| Flow APK | `Wave_Native_SDK\samples\wvr_flow_probe\app\build\outputs\apk\bit64\debug\app-bit64-debug.apk` |
-
-**日志与备份**：SteamVR 主日志 `<SteamVR>\logs\vrserver.txt`；背景程序日志 `flow_dashboard_helper.log`；设置备份 `steamvr.vrsettings.bak-veve`、Desktop+ `config.ini.bak-veve`。
+- 要自己放进仓库的两样（`.gitignore`，重 clone 后要再放）：Wave SDK 的 `repo` → `Wave_Native_SDK\repo\`；JDK 8 → `JAVA_HOME` 或 `tools\jdk8\<任意名>\`。
+- 脚本自己找的：VS（vswhere）、Android SDK（`ANDROID_SDK_ROOT` / `ANDROID_HOME` / `%LOCALAPPDATA%\Android\Sdk`）、NDK（必须在 `<SDK>\ndk\21.4.7075529\`）、SteamVR（`openvrpaths.vrpath`）、Desktop+（`libraryfolders.vdf`）。
+- 建置产物：驱动与日志 `pc\flow_steamvr_driver\build\dist\flowvr\`（`logs\`）；背景程序与日志 `pc\flow_dashboard_helper\build\dist\`；APK `wvr_flow_probe\app\build\outputs\apk\bit64\debug\app-bit64-debug.apk`。
+- 备份：`steamvr.vrsettings.bak-veve`、Desktop+ `config.ini.bak-veve`。
+- 逐项实际路径：`scripts\setup-pc.ps1 -Check` 会全部印出来。
 
 ### 诊断工具
 
@@ -466,9 +438,11 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 - 声音：SteamVR 日志 `Flow audio: ...`；Flow 日志的 `audio` 行（`queuedMs`、补静音次数）
 - 手部：SteamVR 日志每 2 秒一行 `Flow hand ...`；Flow 日志的 `hands` 行
 
+</details>
+
 ---
 
-## 附录 D：授权与致谢
+## 授权与致谢
 
 - 上游项目：[`Mmc1xs/VEVE_FLOW_VR`](https://github.com/Mmc1xs/VEVE_FLOW_VR)（设计、驱动、Flow App、清晰桌面、手部追踪都出自该作者）；本 fork 加了 AMD AMF 支持、一键部署脚本与 VR 视频模式。
 - `pc/openvr/`：Valve OpenVR SDK（submodule）。

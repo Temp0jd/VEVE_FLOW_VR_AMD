@@ -24,12 +24,12 @@ In one sentence: it turns a headset that can only run FlowOS mini-apps into a **
 | PC audio into the headset | Default output device loopback, 48 kHz stereo |
 | Seated VR games | Racing, flight, space, seated Unity/Unreal titles |
 
-**It cannot (hardware ceiling, not a software problem):**
+**It cannot / hasn't yet:**
 
 | Limitation | Why |
 |---|---|
-| **Rotation only (3DoF), no positional tracking** | The Flow has a gyro/accelerometer but no SLAM/depth sensors; no walking around |
-| Replace a Quest-class 6DoF standalone | Same reason |
+| **Currently 3DoF rotation only** | **Not a hardware limit**: the Flow's official spec is inside-out **6DoF** headset tracking via two cameras; it's this project whose app requests head-origin poses (so position is always the origin). Enabling 6DoF is roadmap item #1 |
+| Replace a Quest-class 6DoF standalone | Even with 6DoF on, compute, thermals and ecosystem gaps remain |
 | Match native PC image quality | The picture is sampled twice, so small text is soft (except the "sharp desktop" layer, which is 1:1) |
 | Keep working off-head | The Flow force-sleeps ~5 s after the proximity sensor says "not worn" (dev mode bypasses it, but hand tracking dies) |
 | Work out of the box | You have to build it yourself |
@@ -337,7 +337,7 @@ Only for proving "can the PC desktop reach the Flow at all": `pc\flow_desktop_st
 
 ## Known limitations
 
-- **3DoF only**: no positional tracking hardware; no walking around. Best fits: video and seated games.
+- **Currently 3DoF only** (not a hardware limit): the Flow itself is a 6DoF machine (official spec: inside-out 6DoF headset tracking via two cameras; the manifest declares `3,6DoF`; Wave poses carry `is6DoFPose`), but the app takes poses with `WVR_PoseOriginModel_OriginOnHead`, so position is always the origin, and the driver adds a fixed 1.0 m standing-height offset. See roadmap item #1 for how to enable it. Until then the best fits are video and seated games.
 - Small text is soft; mitigated mainly by enlarging the Desktop+ panel (currently 248 cm) and the sharp-desktop layer.
 - ≈ 55 ms round-trip latency; rotation is timewarp-compensated, translation isn't.
 - The keypad's ← (Backspace) is indistinguishable from the main keyboard's, so it isn't captured.
@@ -352,7 +352,7 @@ Only for proving "can the PC desktop reach the Flow at all": `pc\flow_desktop_st
 - Finger skeleton: turn the Flow's 26 joints into an OpenVR hand skeleton so Half-Life: Alyx, VRChat etc. show fingers.
 - Flow thermals and throttling with hand tracking on for long sessions (only minutes tested so far).
 - More simultaneous buttons: either more gestures (thumb touching index/middle/ring = Trigger/A/B), or a Bluetooth gamepad in each hand (buttons/sticks from the gamepad, position from hand tracking — first test whether the Flow still tracks hands holding gamepads), or both.
-- 6DoF probe: the Flow's manifest declares `NumDoFHmd = "3,6DoF"` and the app already reads `pose.is6DoFPose` (log `hmdDoF=3|6`). It currently uses `OriginOnHead`, so position is always the origin; switching the origin model to ground/tracking-observer and walking around will reveal whether FlowOS can actually deliver 6DoF. **Verify before investing.**
+- **Enable 6DoF (hardware already supports it; top priority)**: the Flow's official spec is inside-out 6DoF headset tracking via two cameras, the manifest declares `NumDoFHmd = "3,6DoF"`, and Wave poses carry `is6DoFPose` (log `hmdDoF=3|6`). What it takes: the app switches the origin model from `OriginOnHead` to `OriginOnGround` (or tracking observer) and passes x/y/z through (the `PosePacket` fields already exist); the driver drops the fixed 1.0 m standing-height offset in favor of the measured height; then drift and tracking-loss recovery get measured in practice. First step: change only the origin model, walk a few steps, and watch `hmdDoF` / `hmdXYZ` in `adb logcat -s FlowProbe`.
 - Simplify the build toolchain (NDK/JDK upgrade).
 
 ---

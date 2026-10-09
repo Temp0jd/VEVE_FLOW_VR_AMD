@@ -24,12 +24,12 @@ PC 跑 SteamVR，画面由显卡硬件编码器（NVIDIA NVENC / AMD AMF）编�
 | PC 声音进头盔 | 默认输出设备环回采集，48 kHz 立体声 |
 | 坐姿 VR 游戏 | 赛车、飞行、太空、坐着玩的 Unity/Unreal 游戏 |
 
-**做不到（硬件天花板，不是软件问题）：**
+**做不到 / 还没做：**
 
 | 限制 | 原因 |
 |---|---|
-| **只有 3DoF 旋转，没有位置追踪** | Flow 只有陀螺仪和加速度计，没有 SLAM/深度传感器；不能站起来走动 |
-| 取代 Quest 之类的 6DoF 一体机 | 同上 |
+| **目前只用 3DoF 旋转** | **这不是硬件上限**：Flow 官方规格就是双摄像头 inside-out **6DoF** 头显追踪；是本项目的 App 当前以头部原点取姿态（位置恒为原点）。启用 6DoF 是待办第一项 |
+| 取代 Quest 之类的 6DoF 一体机 | 即使启用 6DoF，算力、散热与生态仍有差距 |
 | 画质等同 PC 原生 | 画面被采样两次，小字偏软（只有“清晰桌面”图层是 1:1） |
 | 摘下头盔继续用 | Flow 摘下约 5 秒强制休眠（开发模式可绕过，但手部追踪会失效） |
 | 开箱即用 | 需要自己编译 |
@@ -333,7 +333,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 
 ## 已知限制
 
-- **只有 3DoF**：没有位置追踪传感器，不能站起来走动。最合适的场景是看视频与坐姿游戏。
+- **当前只用 3DoF**（不是硬件上限）：Flow 本身是 6DoF 机器（官网规格：双摄像头 inside-out 6DoF 头显追踪；manifest 声明 `3,6DoF`；Wave 姿态带 `is6DoFPose`），但 App 用 `WVR_PoseOriginModel_OriginOnHead` 取姿态、位置恒为原点，驱动再加固定 1.0 m 身高偏移。启用方法见待办第一项。启用前最合适的场景是看视频与坐姿游戏。
 - 小字偏软，主要靠放大 Desktop+ 画面（目前 248 cm）与“清晰桌面”图层改善。
 - 往返延迟约 55 ms；转动有 timewarp 补偿，平移没有。
 - 小键盘的 ←（Backspace）与主键盘无法区分，不拦截。
@@ -348,7 +348,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-awake.ps1 -Off   # 关闭
 - 手指骨架：把 Flow 的 26 关节转成 OpenVR 手部骨架，Half-Life: Alyx、VRChat 等就能显示手指。
 - 长时间开手部追踪时 Flow 的温度与降频（目前只测过几分钟）。
 - 多键同时操作：方案一是扩手势（拇指碰食指/中指/无名指 = Trigger/A/B），方案二是两手各握一支蓝牙手把（按键摇杆来自手把，位置来自手部追踪；需先实测握着手把时 Flow 是否还追得到手），或两者并存。
-- 6DoF 探测：Flow 的 manifest 声明 `NumDoFHmd = "3,6DoF"`，App 已读 `pose.is6DoFPose`（日志 `hmdDoF=3|6`）。目前用 `OriginOnHead`，位置恒为原点；换成 ground/tracking-observer 再走动，就能从日志确定 FlowOS 能不能给 6DoF。**先验证再投入**。
+- **启用 6DoF（硬件已支持，最优先）**：Flow 官方规格即双摄像头 inside-out 6DoF 头显追踪，manifest 已声明 `NumDoFHmd = "3,6DoF"`，Wave 姿态也带 `is6DoFPose`（日志 `hmdDoF=3|6`）。要做的是：App 把 origin model 从 `OriginOnHead` 换成 `OriginOnGround`（或 tracking observer）并把 x/y/z 透传（`PosePacket` 字段已有）；驱动去掉固定 1.0 m 身高偏移、改用实测高度；实测漂移与追踪丢失恢复。先只换 origin model 走两步，看 `adb logcat -s FlowProbe` 里的 `hmdDoF` / `hmdXYZ` 验证。
 - 简化建置环境（NDK/JDK 升级）。
 
 ---

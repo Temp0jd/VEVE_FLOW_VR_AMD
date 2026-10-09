@@ -47,6 +47,11 @@ namespace
 	constexpr auto kOpenRetryWindow = std::chrono::seconds( 60 );
 	// Let the head pose settle after the Flow connects before placing the dashboard.
 	constexpr auto kSettleAfterConnect = std::chrono::milliseconds( 1500 );
+	// The seated zero pose fix below cannot report failure (ResetZeroPose returns void), so the
+	// pose is re-read every pass and the reset retried every 2 s, for up to a minute per connect;
+	// a single attempt that silently failed used to leave seated games grey for the whole session.
+	constexpr auto kSeatedZeroPoseRetry = std::chrono::seconds( 2 );
+	constexpr auto kSeatedZeroPoseGiveUp = std::chrono::seconds( 60 );
 	// Scene change events arrive at the start of a transition (e.g. Home -> game, while Home is
 	// still the scene). Wait this long and require a settled scene state before deciding.
 	constexpr auto kSettleAfterSceneChange = std::chrono::milliseconds( 2000 );
@@ -307,15 +312,22 @@ namespace
 	// poses until the seated zero pose of the Flow's tracking universe has been set, and SteamVR
 	// then fades them to its trackingLossColor (a flat grey). Set it from the current head pose
 	// when it is missing.
-	void EnsureSeatedZeroPose()
+	bool SeatedZeroPoseValid()
 	{
 		vr::TrackedDevicePose_t pose{};
 		vr::VRSystem()->GetDeviceToAbsoluteTrackingPose( vr::TrackingUniverseSeated, 0.f, &pose, 1 );
-		if ( pose.bPoseIsValid )
+		return pose.bPoseIsValid;
+	}
+
+	void ResetSeatedZeroPose()
+	{
+		// No error return: the next pass reads the pose back to find out whether this took effect.
+		vr::IVRChaperone *chaperone = vr::VRChaperone();
+		if ( chaperone == nullptr )
 		{
-			return;
+			return; // SteamVR is restarting; the next pass tries again
 		}
-		vr::VRChaperone()->ResetZeroPose( vr::TrackingUniverseSeated );
+		chaperone->ResetZeroPose( vr::TrackingUniverseSeated );
 		Log( "seated zero pose was not set: reset it to the current head pose" );
 	}
 
@@ -546,6 +558,10 @@ int main( int argc, char **argv )
 		CreateMutexA( nullptr, TRUE, "Local\\FlowDashboardHelper" );
 		if ( GetLastError() == ERROR_ALREADY_EXISTS )
 		{
+			// A leftover instance holding the mutex (e.g. vrserver was killed and the old helper
+			// never saw VREvent_Quit) must not make this exit invisible: the seated-zero-pose fix
+			// and everything else the helper does then silently never happens.
+			Log( "another instance is already running; exiting" );
 			return 0;
 		}
 	}
@@ -616,7 +632,8 @@ int main( int argc, char **argv )
 	using Clock = std::chrono::steady_clock;
 	bool open_pending = true; // SteamVR just started: open once the Flow is connected
 	bool flow_connected = false;
-	bool seated_zero_checked = false; // once per SteamVR session, after the head pose has settled
+	bool seated_zero_checked = false; // true once verified valid; re-armed on every Flow connect
+	Clock::time_point seated_zero_reset_at{}; // last ResetZeroPose attempt (rate-limited)
 	bool close_check_pending = false; // scene changed: close the dashboard if a game took over
 	Clock::time_point connected_at{};
 	Clock::time_point open_eligible_at{}; // when the pending open first became possible
@@ -656,6 +673,7 @@ int main( int argc, char **argv )
 				connected_at = now;
 				open_pending = true; // e.g. headset put back on
 				open_eligible_at = {};
+				seated_zero_checked = false; // cheap: no-ops at once while the pose stays valid
 			}
 		}
 
@@ -674,8 +692,22 @@ int main( int argc, char **argv )
 
 		if ( !seated_zero_checked && running && flow_connected && now - connected_at >= kSettleAfterConnect )
 		{
-			EnsureSeatedZeroPose();
-			seated_zero_checked = true;
+			if ( SeatedZeroPoseValid() )
+			{
+				seated_zero_checked = true;
+				Log( "seated zero pose is set" ); // the valid branch leaves a trace too (see README)
+			}
+			else if ( now - connected_at >= kSeatedZeroPoseGiveUp )
+			{
+				seated_zero_checked = true; // until the Flow reconnects (which re-arms the check)
+				Log( "seated zero pose still invalid after %lld s of retries: seated games will fade to grey - use the SteamVR menu's reset seated position",
+				     static_cast< long long >( std::chrono::duration_cast< std::chrono::seconds >( kSeatedZeroPoseGiveUp ).count() ) );
+			}
+			else if ( now - seated_zero_reset_at >= kSeatedZeroPoseRetry )
+			{
+				seated_zero_reset_at = now;
+				ResetSeatedZeroPose();
+			}
 		}
 
 		if ( open_pending && running && flow_connected && now - connected_at >= kSettleAfterConnect &&

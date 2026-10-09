@@ -93,8 +93,10 @@ private:
 		std::chrono::steady_clock::time_point received_at = std::chrono::steady_clock::time_point::min();
 	};
 
-	// True while the Flow keeps sending poses (it stops when taken off and put to sleep).
-	bool IsFlowPoseFresh( const FlowPose &pose, std::chrono::steady_clock::time_point now ) const;
+	// True while the Flow has sent a pose within max_age (default 500 ms). Past that age the pose
+	// path keeps using the last pose (see GetPose), and presence uses a longer window of its own.
+	bool IsFlowPoseFresh( const FlowPose &pose, std::chrono::steady_clock::time_point now,
+	                      std::chrono::milliseconds max_age = std::chrono::milliseconds( 500 ) ) const;
 
 	std::unique_ptr< MyHMDDisplayComponent > my_display_component_;
 	std::unique_ptr< FlowVirtualDisplayDevice > my_virtual_display_component_;
@@ -111,5 +113,6 @@ private:
 	std::thread my_pose_receive_thread_;
 	std::mutex pose_mutex_;
 	FlowPose latest_pose_;
-	bool user_present_ = false; // last value sent on /proximity
+	bool user_present_ = false;          // last value sent on /proximity
+	std::atomic< bool > pose_stale_{ false }; // last staleness state, for the one-shot log line
 };

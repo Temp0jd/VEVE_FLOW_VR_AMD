@@ -206,17 +206,40 @@ vr::DriverPose_t MyHMDControllerDeviceDriver::GetPose()
 		flow_pose = latest_pose_;
 	}
 
-	const bool flow_pose_fresh = IsFlowPoseFresh( flow_pose, std::chrono::steady_clock::now() );
+	const auto now = std::chrono::steady_clock::now();
+	const bool have_pose = flow_pose.received_at != ( std::chrono::steady_clock::time_point::min )();
+	const bool flow_pose_fresh = IsFlowPoseFresh( flow_pose, now );
 	g_flow_pose_sequence_in_use.store( flow_pose_fresh ? flow_pose.sequence : 0 );
 
-	pose.qRotation.x = flow_pose_fresh ? flow_pose.qx : 0.0;
-	pose.qRotation.y = flow_pose_fresh ? flow_pose.qy : 0.0;
-	pose.qRotation.z = flow_pose_fresh ? flow_pose.qz : 0.0;
-	pose.qRotation.w = flow_pose_fresh ? flow_pose.qw : 1.0;
+	// Hold the last received orientation and position while the pose is stale instead of falling
+	// back to the identity pose. The identity quaternion is the canonical "facing forward" pose,
+	// so a single late or lost UDP packet used to snap the view back to dead ahead (a 360 video
+	// then looked locked in front of the viewer). Holding the last pose lets SteamVR keep
+	// timewarping from it. Only a pose we have never received falls back to the identity.
+	if ( !flow_pose_fresh )
+	{
+		if ( !pose_stale_ )
+		{
+			pose_stale_ = true;
+			DriverLog( have_pose
+			               ? "Flow pose UDP: stale (>500 ms); holding the last pose instead of snapping forward"
+			               : "Flow pose UDP: no pose received yet; reporting the identity pose" );
+		}
+	}
+	else if ( pose_stale_ )
+	{
+		pose_stale_ = false;
+		DriverLog( "Flow pose UDP: fresh again" );
+	}
 
-	pose.vecPosition[ 0 ] = flow_pose_fresh ? flow_pose.x : 0.0;
-	pose.vecPosition[ 1 ] = ( flow_pose_fresh ? flow_pose.y : 0.0 ) + kFlowStandingHeightOffset;
-	pose.vecPosition[ 2 ] = flow_pose_fresh ? flow_pose.z : 0.0;
+	pose.qRotation.x = have_pose ? flow_pose.qx : 0.0;
+	pose.qRotation.y = have_pose ? flow_pose.qy : 0.0;
+	pose.qRotation.z = have_pose ? flow_pose.qz : 0.0;
+	pose.qRotation.w = have_pose ? flow_pose.qw : 1.0;
+
+	pose.vecPosition[ 0 ] = have_pose ? flow_pose.x : 0.0;
+	pose.vecPosition[ 1 ] = ( have_pose ? flow_pose.y : 0.0 ) + kFlowStandingHeightOffset;
+	pose.vecPosition[ 2 ] = have_pose ? flow_pose.z : 0.0;
 
 	// The pose we provided is valid.
 	// This should be set is
@@ -238,10 +261,11 @@ vr::DriverPose_t MyHMDControllerDeviceDriver::GetPose()
 	return pose;
 }
 
-bool MyHMDControllerDeviceDriver::IsFlowPoseFresh( const FlowPose &pose, std::chrono::steady_clock::time_point now ) const
+bool MyHMDControllerDeviceDriver::IsFlowPoseFresh( const FlowPose &pose, std::chrono::steady_clock::time_point now,
+                                                   std::chrono::milliseconds max_age ) const
 {
 	return pose.received_at != ( std::chrono::steady_clock::time_point::min )() // parens dodge the windows.h min macro
-		&& now - pose.received_at < std::chrono::milliseconds( 500 );
+		&& now - pose.received_at < max_age;
 }
 
 void MyHMDControllerDeviceDriver::MyPoseReceiveThread()
@@ -439,7 +463,10 @@ void MyHMDControllerDeviceDriver::MyRunFrame()
 		std::lock_guard< std::mutex > lock( pose_mutex_ );
 		flow_pose = latest_pose_;
 	}
-	const bool present = IsFlowPoseFresh( flow_pose, std::chrono::steady_clock::now() );
+	// Presence uses a longer window than the pose path: a brief gap (a Wi-Fi hiccup while a
+	// high-bitrate video is streaming) must not flip SteamVR's activity level to Idle, which
+	// fades Unity apps to grey in the middle of a scene.
+	const bool present = IsFlowPoseFresh( flow_pose, std::chrono::steady_clock::now(), std::chrono::milliseconds( 3000 ) );
 	if ( present != user_present_ || frame_number_ == 1 )
 	{
 		vr::VRDriverInput()->UpdateBooleanComponent( my_input_handles_[ MyComponent_head_proximity_click ], present, 0.0 );
